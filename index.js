@@ -438,19 +438,23 @@ export async function runScreeningCycle({ silent = false } = {}) {
 
     const allCandidates = [];
     for (const pool of candidates) {
-      const mint = pool.base?.mint;
-      const [smartWallets, narrative, tokenInfo] = await Promise.allSettled([
-        checkSmartWalletsOnPool({ pool_address: pool.pool }),
-        mint ? getTokenNarrative({ mint }) : Promise.resolve(null),
-        mint ? getTokenInfo({ query: mint }) : Promise.resolve(null),
-      ]);
-      allCandidates.push({
-        pool,
-        sw: smartWallets.status === "fulfilled" ? smartWallets.value : null,
-        n: narrative.status === "fulfilled" ? narrative.value : null,
-        ti: tokenInfo.status === "fulfilled" ? tokenInfo.value?.results?.[0] : null,
-        mem: recallForPool(pool.pool),
-      });
+      try {
+        const mint = pool.base?.mint;
+        const [smartWallets, narrative, tokenInfo] = await Promise.allSettled([
+          checkSmartWalletsOnPool({ pool_address: pool.pool }),
+          mint ? getTokenNarrative({ mint }) : Promise.resolve(null),
+          mint ? getTokenInfo({ query: mint }) : Promise.resolve(null),
+        ]);
+        allCandidates.push({
+          pool,
+          sw: smartWallets.status === "fulfilled" ? smartWallets.value : null,
+          n: narrative.status === "fulfilled" ? narrative.value : null,
+          ti: tokenInfo.status === "fulfilled" ? tokenInfo.value?.results?.[0] : null,
+          mem: recallForPool(pool.pool),
+        });
+      } catch (e) {
+        log("screening_warn", `Failed to enrich candidate ${pool.name}: ${e.message}`);
+      }
       await new Promise(r => setTimeout(r, 150)); // avoid 429s
     }
 

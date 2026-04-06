@@ -46,6 +46,7 @@ async function okxRequest(method, path, body = null) {
     method,
     headers,
     ...(body != null ? { body: bodyText } : {}),
+    signal: AbortSignal.timeout(15_000),
   });
   if (!res.ok) throw new Error(`OKX API ${res.status}: ${path}`);
   const json = await res.json();

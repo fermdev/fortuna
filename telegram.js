@@ -88,6 +88,7 @@ async function postTelegram(method, body) {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ chat_id: chatId, ...body }),
+      signal: AbortSignal.timeout(10_000),
     });
     if (!res.ok) {
       const err = await res.text();
