@@ -104,6 +104,10 @@ const CONFIG_READ_ONLY_INTENTS = /\b(check|show|what(?:'s| is)?|review|inspect|s
 function shouldRequireRealToolUse(goal, agentType, interactive = false) {
   if (agentType === "MANAGER") return false;
   if (CONFIG_READ_ONLY_INTENTS.test(goal)) return false;
+  // If it's a "why/how/what" question, don't force a tool execution for the result — 
+  // the model might be explaining based on already-provided prompt context or history.
+  const isQuestion = /^(why|how|what|explain|tell me about|ada apa|kenapa)/i.test(goal.trim());
+  if (isQuestion) return false;
   return interactive && TOOL_REQUIRED_INTENTS.test(goal);
 }
 
