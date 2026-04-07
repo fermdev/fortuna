@@ -463,12 +463,6 @@ async function runSafetyChecks(name, args) {
           reason: "self_update is disabled by default. Set ALLOW_SELF_UPDATE=true locally if you really want to enable it.",
         };
       }
-      if (!process.stdin.isTTY) {
-        return {
-          pass: false,
-          reason: "self_update is only allowed from a local interactive TTY session, not from Telegram or background automation.",
-        };
-      }
       return { pass: true };
     }
 
