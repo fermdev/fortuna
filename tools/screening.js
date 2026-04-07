@@ -355,6 +355,16 @@ export async function getPoolDetail({ pool_address, timeframe = "5m" }) {
     throw new Error(`Pool ${pool_address} not found`);
   }
 
+  // API sometimes returns 0 for fee_active_tvl_ratio on short timeframes — compute from raw values as fallback
+  if (!pool.fee_active_tvl_ratio && pool.active_tvl > 0) {
+    pool.fee_active_tvl_ratio = fix((pool.fee / pool.active_tvl) * 100, 4);
+    // Note: ensure we don't accidentally pass raw fee=0 if we know volume exists (though fee should be derived correctly from volume locally if Meteora totally blanked)
+    if (!pool.fee && pool.volume > 0 && pool.fee_pct > 0) {
+      pool.fee = (pool.volume * pool.fee_pct) / 100;
+      pool.fee_active_tvl_ratio = fix((pool.fee / pool.active_tvl) * 100, 4);
+    }
+  }
+
   return pool;
 }
 
@@ -382,12 +392,14 @@ function condensePool(p) {
 
     // Core metrics (the numbers that matter)
     active_tvl: round(p.active_tvl),
-    fee_window: round(p.fee),
+    // API sometimes returns 0 for fee and ratio on short timeframes — compute from raw values as fallback
+    fee_window: round(p.fee > 0 ? p.fee : (p.volume > 0 && p.fee_pct > 0 ? (p.volume * p.fee_pct) / 100 : 0)),
     volume_window: round(p.volume),
-    // API sometimes returns 0 for fee_active_tvl_ratio on short timeframes — compute from raw values as fallback
     fee_active_tvl_ratio: p.fee_active_tvl_ratio > 0
       ? fix(p.fee_active_tvl_ratio, 4)
-      : (p.active_tvl > 0 ? fix((p.fee / p.active_tvl) * 100, 4) : 0),
+      : (p.active_tvl > 0 
+          ? fix(((p.fee > 0 ? p.fee : (p.volume > 0 && p.fee_pct > 0 ? (p.volume * p.fee_pct) / 100 : 0)) / p.active_tvl) * 100, 4) 
+          : 0),
     volatility: fix(p.volatility, 2),
 
 
