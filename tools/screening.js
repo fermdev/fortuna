@@ -252,18 +252,30 @@ export async function getTopCandidates({ limit = 10 } = {}) {
         if (clusters.status !== "fulfilled") log("okx", `cluster-list unavailable for ${p.name} (${mintShort})`);
         if (risk.status !== "fulfilled")     log("okx", `risk-check unavailable for ${p.name} (${mintShort})`);
 
+        // Also fetch 24h volatility from Meteora to fix 0% volatility on 5m timeframe
+        const vol24Promise = fetch(`${POOL_DISCOVERY_BASE}/pools?page_size=1&filter_by=${encodeURIComponent(`pool_address=${p.pool}`)}&timeframe=24h`, { signal: AbortSignal.timeout(10_000) })
+          .then(r => r.ok ? r.json() : null)
+          .then(d => d?.data?.[0]?.volatility)
+          .catch(() => null);
+        const vol24 = await vol24Promise;
+
         return {
           adv: adv.status === "fulfilled" ? adv.value : null,
           price: price.status === "fulfilled" ? price.value : null,
           clusters: clusters.status === "fulfilled" ? clusters.value : [],
           risk: risk.status === "fulfilled" ? risk.value : null,
+          vol24: typeof vol24 === "number" ? vol24 : null,
         };
       })
     );
     for (let i = 0; i < eligible.length; i++) {
       const r = okxResults[i];
       if (r.status !== "fulfilled") continue;
-      const { adv, price, clusters, risk } = r.value;
+      const { adv, price, clusters, risk, vol24 } = r.value;
+      
+      if (vol24 != null) {
+        eligible[i].volatility = fix(vol24, 2);
+      }
       if (adv) {
         eligible[i].risk_level      = adv.risk_level;
         eligible[i].bundle_pct      = adv.bundle_pct;
@@ -353,6 +365,23 @@ export async function getPoolDetail({ pool_address, timeframe = "5m" }) {
 
   if (!pool) {
     throw new Error(`Pool ${pool_address} not found`);
+  }
+
+  // Override volatility with 24h data because 5m data often returns 0
+  if (timeframe !== "24h") {
+    try {
+      const url24h = `${POOL_DISCOVERY_BASE}/pools?page_size=1&filter_by=${encodeURIComponent(`pool_address=${pool_address}`)}&timeframe=24h`;
+      const res24h = await fetch(url24h, { signal: AbortSignal.timeout(10_000) });
+      if (res24h.ok) {
+        const data24h = await res24h.json();
+        const pool24h = (data24h.data || [])[0];
+        if (pool24h && typeof pool24h.volatility === "number") {
+          pool.volatility = pool24h.volatility;
+        }
+      }
+    } catch (e) {
+      log("screening", `Failed to fetch 24h volatility for ${pool_address}: ${e.message}`);
+    }
   }
 
   // API sometimes returns 0 for fee_active_tvl_ratio on short timeframes — compute from raw values as fallback
