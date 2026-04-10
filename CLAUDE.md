@@ -110,6 +110,10 @@ Sets defined in `agent.js:6-7`. If you add a tool, also add it to the relevant s
 Before `deploy_position` executes:
 - Pool TVL is fetched via `get_pool_detail` and must be strictly `> 0`
 - Pool TVL must be `>= max(10,000, config.screening.minTvl)` (hard floor)
+- Pool must be refundable (non-refundable pools are hard-blocked)
+- Strategy is hard-forced to `bid_ask`
+- `bins_above` is hard-forced to `0` (max price at active bin)
+- `bins_below` must map to min price in the `-40%` to `-70%` window
 - `bin_step` must be within `[minBinStep, maxBinStep]`
 - Position count must be below `maxPositions` (force-fresh scan, no cache)
 - No duplicate pool allowed (same pool_address)
@@ -120,17 +124,12 @@ Before `deploy_position` executes:
 
 ---
 
-## bins_below Calculation (SCREENER)
+## bins_below Rule (SCREENER)
 
-Linear formula based on pool volatility (set in screener prompt, `index.js`):
+`bins_below` is no longer a fixed linear formula.
+It must map to a minimum price drawdown between `-40%` and `-70%` (depending on bin_step and conviction), with `bins_above=0` and `bid_ask` strategy.
 
-```
-bins_below = round(35 + (volatility / 5) * 34), clamped to [35, 69]
-```
-
-- Low volatility (0) → 35 bins
-- High volatility (5+) → 69 bins
-- Any value in between is valid (continuous, not tiered)
+- If omitted, executor auto-fills a midpoint drawdown target (~`-55%`).
 
 ---
 

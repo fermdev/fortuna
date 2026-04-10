@@ -370,6 +370,7 @@ export async function executeTool(name, args) {
 async function runSafetyChecks(name, args) {
   switch (name) {
     case "deploy_position": {
+      args = args || {};
       // Hard TVL floor: never deploy to pools with 0/unknown TVL.
       // Always verify using fresh pool detail before any on-chain action.
       const minTvl = Math.max(10_000, Number(config.screening.minTvl || 0));
@@ -402,14 +403,56 @@ async function runSafetyChecks(name, args) {
         };
       }
 
+      // Hard rule: never deploy to non-refundable pools.
+      if (isNonRefundablePool(poolDetail)) {
+        return {
+          pass: false,
+          reason: `Pool ${args.pool_address} rejected: non-refundable pool is not allowed by hard rule.`,
+        };
+      }
+
+      // Hard rule: always use bid_ask and keep max price at active bin.
+      args.strategy = "bid_ask";
+      args.bins_above = 0;
+
       // Reject pools with bin_step out of configured range
       const minStep = config.screening.minBinStep;
       const maxStep = config.screening.maxBinStep;
-      if (args.bin_step != null && (args.bin_step < minStep || args.bin_step > maxStep)) {
+      const binStep = Number(args.bin_step ?? poolDetail?.dlmm_params?.bin_step ?? poolDetail?.bin_step ?? NaN);
+      if (!Number.isFinite(binStep)) {
         return {
           pass: false,
-          reason: `bin_step ${args.bin_step} is outside the allowed range of [${minStep}-${maxStep}].`,
+          reason: `Cannot verify bin_step for pool ${args.pool_address}.`,
         };
+      }
+      args.bin_step = binStep;
+      if (binStep < minStep || binStep > maxStep) {
+        return {
+          pass: false,
+          reason: `bin_step ${binStep} is outside the allowed range of [${minStep}-${maxStep}].`,
+        };
+      }
+
+      // Hard rule: min price range must be between -40% and -70%.
+      const minBinsBelow = binsForDrawdownPct(40, binStep);
+      const maxBinsBelow = binsForDrawdownPct(70, binStep);
+      if (args.bins_below == null) {
+        // Default to midpoint drawdown (-55%) when caller omits bins.
+        args.bins_below = binsForDrawdownPct(55, binStep);
+      } else {
+        const binsBelow = Number(args.bins_below);
+        if (!Number.isFinite(binsBelow)) {
+          return {
+            pass: false,
+            reason: `bins_below must be a number.`,
+          };
+        }
+        if (binsBelow < minBinsBelow || binsBelow > maxBinsBelow) {
+          return {
+            pass: false,
+            reason: `bins_below ${binsBelow} is outside required range for this bin_step (${binStep}): use ${minBinsBelow}-${maxBinsBelow} bins (min price -40% to -70%).`,
+          };
+        }
       }
 
       // Check position count limit + duplicate pool guard — force fresh scan to avoid stale cache
@@ -512,4 +555,39 @@ function summarizeResult(result) {
     return str.slice(0, 1000) + "...(truncated)";
   }
   return result;
+}
+
+function binsForDrawdownPct(pct, binStepBps) {
+  const drawdown = Number(pct) / 100;
+  const step = Number(binStepBps) / 10_000;
+  if (!(drawdown > 0 && drawdown < 1) || !(step > 0)) return NaN;
+  return Math.ceil(Math.log(1 - drawdown) / Math.log(1 / (1 + step)));
+}
+
+function isNonRefundablePool(poolDetail = {}) {
+  // Defensive key scan because upstream payload field naming can vary.
+  const refundable = firstDefined([
+    poolDetail?.is_refundable,
+    poolDetail?.refundable,
+    poolDetail?.fee_refundable,
+    poolDetail?.is_fee_refundable,
+    poolDetail?.dlmm_params?.is_refundable,
+    poolDetail?.dlmm_params?.fee_refundable,
+  ]);
+  const nonRefundable = firstDefined([
+    poolDetail?.non_refundable,
+    poolDetail?.is_non_refundable,
+    poolDetail?.dlmm_params?.non_refundable,
+    poolDetail?.dlmm_params?.is_non_refundable,
+  ]);
+  if (nonRefundable === true) return true;
+  if (refundable === false) return true;
+  return false;
+}
+
+function firstDefined(values) {
+  for (const v of values) {
+    if (v !== undefined && v !== null) return v;
+  }
+  return undefined;
 }

@@ -127,16 +127,21 @@ Only call this if you need the current price to calculate a specific bin range (
       description: `Open a new DLMM liquidity position.
 
 PRIORITY ORDER for strategy and bins:
-1. User explicitly specifies → always follow exactly (user override is absolute)
-2. No user spec → use active strategy's lp_strategy and choose bins based on volatility
+1. Hard safety rules first (cannot be overridden)
+2. User specifies amount/pool within safety boundaries
+3. No user spec → choose bins based on volatility inside allowed range
 
 HARD RULES:
 - Never use 'curve'.
+- Always use 'bid_ask' for opening positions.
+- bins_above MUST be 0.
+- bins_below must map to min price range between -40% and -70%.
+- Never deploy to non-refundable pools.
 - Bin Step: Only deploy in pools with bin_step between 80 and 125.
 
 Guidelines (only when user hasn't specified):
-- Strategy: use the active strategy's lp_strategy field (bid_ask or spot)
-- Bins: choose 35–69 for standard volatility; up to 350 for wide-range strategies. Max 1400 total.
+- Strategy: always bid_ask
+- Bins: choose bins_below that map min price to -40% to -70% drawdown
 - Deposit: Can be single-sided (SOL only or Base only) or dual-sided.
 
 WARNING: This executes a real on-chain transaction. Check DRY_RUN mode.`,
@@ -161,16 +166,16 @@ WARNING: This executes a real on-chain transaction. Check DRY_RUN mode.`,
           },
           strategy: {
             type: "string",
-            enum: ["bid_ask", "spot"],
-            description: "DLMM strategy type. If user specifies, use exactly what they said. Otherwise use the active strategy's lp_strategy field."
+            enum: ["bid_ask"],
+            description: "DLMM strategy type. Hard-forced to bid_ask."
           },
           bins_below: {
             type: "number",
-            description: "Number of bins below active bin. If the user specifies a value, use it exactly. If they specify a % range (e.g. '-60% range'), convert using: bins = ceil(log(1 - pct) / log(1 + bin_step/10000)). Example: -60% range at bin_step 100 → ceil(log(0.40)/log(1.01)) = 92 bins. Otherwise choose based on volatility: 35–69 standard, 100–350 for wide-range strategies. Max 1400 total."
+            description: "Number of bins below active bin. Must map to min price drawdown between -40% and -70%. Conversion: bins = ceil(log(1-pct) / log(1/(1+bin_step/10000))). Example: -60% at bin_step 100 → ceil(log(0.40)/log(1/1.01)) = 93 bins."
           },
           bins_above: {
             type: "number",
-            description: "Number of bins above active bin. MUST be 0 for bid_ask strategy — placing bins above active bin defeats the purpose of bid-ask. Only set > 0 for spot/dual-sided strategies."
+            description: "Number of bins above active bin. Hard rule: MUST be 0."
           },
           pool_name: { type: "string", description: "Human-readable pool name for record-keeping" },
           base_mint: { type: "string", description: "Base token mint address — used to prevent duplicate token exposure across pools" },

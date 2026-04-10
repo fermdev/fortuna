@@ -109,10 +109,10 @@ export async function deployPosition({
   initial_value_usd,
 }) {
   pool_address = normalizeMint(pool_address);
-  // Force bid_ask strategy and strict bins (binsAbove: 0) if configured
-  const activeStrategy = config.strategy.strategy === "bid_ask" ? "bid_ask" : (strategy || config.strategy.strategy);
+  // Hard rule: opening positions is always bid_ask with no bins above active bin.
+  const activeStrategy = "bid_ask";
   const activeBinsBelow = bins_below ?? config.strategy.binsBelow;
-  const activeBinsAbove = config.strategy.strategy === "bid_ask" ? 0 : (bins_above ?? 0);
+  const activeBinsAbove = 0;
 
   if (isPoolOnCooldown(pool_address)) {
     log("deploy", `Pool ${pool_address.slice(0, 8)} is on cooldown — skipping`);
