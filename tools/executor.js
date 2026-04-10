@@ -370,6 +370,38 @@ export async function executeTool(name, args) {
 async function runSafetyChecks(name, args) {
   switch (name) {
     case "deploy_position": {
+      // Hard TVL floor: never deploy to pools with 0/unknown TVL.
+      // Always verify using fresh pool detail before any on-chain action.
+      const minTvl = Math.max(10_000, Number(config.screening.minTvl || 0));
+      if (!args.pool_address) {
+        return {
+          pass: false,
+          reason: "pool_address is required for deploy_position.",
+        };
+      }
+      let poolDetail;
+      try {
+        poolDetail = await getPoolDetail({ pool_address: args.pool_address, timeframe: config.screening.timeframe });
+      } catch (e) {
+        return {
+          pass: false,
+          reason: `Cannot verify pool TVL for ${args.pool_address}. get_pool_detail failed: ${e.message}`,
+        };
+      }
+      const activeTvl = Number(poolDetail?.active_tvl ?? poolDetail?.tvl ?? 0);
+      if (!(activeTvl > 0)) {
+        return {
+          pass: false,
+          reason: `Pool ${args.pool_address} rejected: TVL is 0 or unavailable. Hard rule forbids deploy.`,
+        };
+      }
+      if (activeTvl < minTvl) {
+        return {
+          pass: false,
+          reason: `Pool ${args.pool_address} rejected: TVL $${activeTvl.toLocaleString("en-US")} is below hard minimum $${minTvl.toLocaleString("en-US")}.`,
+        };
+      }
+
       // Reject pools with bin_step out of configured range
       const minStep = config.screening.minBinStep;
       const maxStep = config.screening.maxBinStep;

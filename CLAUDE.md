@@ -108,6 +108,8 @@ Sets defined in `agent.js:6-7`. If you add a tool, also add it to the relevant s
 ## Screener Safety Checks (executor.js)
 
 Before `deploy_position` executes:
+- Pool TVL is fetched via `get_pool_detail` and must be strictly `> 0`
+- Pool TVL must be `>= max(10,000, config.screening.minTvl)` (hard floor)
 - `bin_step` must be within `[minBinStep, maxBinStep]`
 - Position count must be below `maxPositions` (force-fresh scan, no cache)
 - No duplicate pool allowed (same pool_address)
