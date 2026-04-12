@@ -5,7 +5,7 @@ import { agentLoop } from "./agent.js";
 import { log } from "./logger.js";
 import { getMyPositions, closePosition, getActiveBin } from "./tools/dlmm.js";
 import { getWalletBalances } from "./tools/wallet.js";
-import { getTopCandidates } from "./tools/screening.js";
+import { getTopCandidates, discoverPools } from "./tools/screening.js";
 import { config, reloadScreeningThresholds, computeDeployAmount } from "./config.js";
 import { evolveThresholds, getPerformanceSummary } from "./lessons.js";
 import { registerCronRestarter } from "./tools/executor.js";
@@ -83,6 +83,65 @@ function sanitizeUntrustedPromptText(text, maxLen = 500) {
     .trim()
     .slice(0, maxLen);
   return cleaned ? JSON.stringify(cleaned) : null;
+}
+
+function toNumber(value) {
+  if (value == null || value === "") return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function scoreRadarPool(pool) {
+  const feeTvl = toNumber(pool?.fee_active_tvl_ratio) || 0;
+  const organic = toNumber(pool?.organic_score) || 0;
+  const volume = toNumber(pool?.volume_window) || 0;
+  const holders = toNumber(pool?.holders) || 0;
+  return feeTvl * 1000 + organic * 10 + volume / 100 + holders / 100;
+}
+
+function getStrictRejectReasons(pool, tokenInfo) {
+  const reasons = [];
+  const s = config.screening;
+  const launchpad = tokenInfo?.launchpad ?? null;
+  const botPct = toNumber(tokenInfo?.audit?.bot_holders_pct);
+  const top10Pct = toNumber(tokenInfo?.audit?.top_holders_pct);
+  const feesSol = toNumber(tokenInfo?.global_fees_sol);
+
+  if (toNumber(pool?.active_tvl) != null && toNumber(pool.active_tvl) < Number(s.minTvl || 0)) {
+    reasons.push(`tvl ${pool.active_tvl} < ${s.minTvl}`);
+  }
+  if (toNumber(pool?.volume_window) != null && toNumber(pool.volume_window) < Number(s.minVolume || 0)) {
+    reasons.push(`volume ${pool.volume_window} < ${s.minVolume}`);
+  }
+  if (toNumber(pool?.fee_active_tvl_ratio) != null && toNumber(pool.fee_active_tvl_ratio) < Number(s.minFeeActiveTvlRatio || 0)) {
+    reasons.push(`fee/tvl ${pool.fee_active_tvl_ratio} < ${s.minFeeActiveTvlRatio}`);
+  }
+  if (toNumber(pool?.organic_score) != null && toNumber(pool.organic_score) < Number(s.minOrganic || 0)) {
+    reasons.push(`organic ${pool.organic_score} < ${s.minOrganic}`);
+  }
+  if (toNumber(pool?.token_age_hours) != null && s.minTokenAgeHours != null && toNumber(pool.token_age_hours) < Number(s.minTokenAgeHours)) {
+    reasons.push(`age ${pool.token_age_hours}h < ${s.minTokenAgeHours}h`);
+  }
+  if (toNumber(pool?.token_age_hours) != null && s.maxTokenAgeHours != null && toNumber(pool.token_age_hours) > Number(s.maxTokenAgeHours)) {
+    reasons.push(`age ${pool.token_age_hours}h > ${s.maxTokenAgeHours}h`);
+  }
+  if (launchpad && Array.isArray(s.allowedLaunchpads) && s.allowedLaunchpads.length > 0 && !s.allowedLaunchpads.includes(launchpad)) {
+    reasons.push(`launchpad ${launchpad} not allow-listed`);
+  }
+  if (launchpad && Array.isArray(s.blockedLaunchpads) && s.blockedLaunchpads.includes(launchpad)) {
+    reasons.push(`launchpad ${launchpad} blocked`);
+  }
+  if (botPct != null && s.maxBotHoldersPct != null && botPct > Number(s.maxBotHoldersPct)) {
+    reasons.push(`bot holders ${botPct}% > ${s.maxBotHoldersPct}%`);
+  }
+  if (top10Pct != null && s.maxTop10Pct != null && top10Pct > Number(s.maxTop10Pct)) {
+    reasons.push(`top10 ${top10Pct}% > ${s.maxTop10Pct}%`);
+  }
+  if (feesSol != null && s.minTokenFeesSol != null && feesSol < Number(s.minTokenFeesSol)) {
+    reasons.push(`fees ${feesSol} SOL < ${s.minTokenFeesSol}`);
+  }
+
+  return reasons;
 }
 
 function schedulePeakConfirmation(positionAddress) {
@@ -434,7 +493,20 @@ export async function runScreeningCycle({ silent = false } = {}) {
 
     // Fetch top candidates, then recon each sequentially with a small delay to avoid 429s
     const topCandidates = await getTopCandidates({ limit: 10 }).catch(() => null);
-    const candidates = (topCandidates?.candidates || topCandidates?.pools || []).slice(0, 10);
+    let candidates = (topCandidates?.candidates || topCandidates?.pools || []).slice(0, 10);
+    let candidateSource = "strict";
+
+    if (candidates.length === 0) {
+      const radar = await discoverPools({ page_size: 120, mode: "radar" }).catch(() => null);
+      const radarPools = (radar?.pools || [])
+        .sort((a, b) => scoreRadarPool(b) - scoreRadarPool(a))
+        .slice(0, 10);
+      if (radarPools.length > 0) {
+        candidateSource = "radar";
+        candidates = radarPools;
+        log("screening", `Strict candidate shortlist empty — using radar fallback (${radarPools.length} pools)`);
+      }
+    }
 
     const allCandidates = [];
     for (const pool of candidates) {
@@ -459,27 +531,42 @@ export async function runScreeningCycle({ silent = false } = {}) {
     }
 
     // Hard filters after token recon — block launchpads and excessive Jupiter bot holders
-    const passing = allCandidates.filter(({ pool, ti }) => {
-      const launchpad = ti?.launchpad ?? null;
-      if (launchpad && config.screening.allowedLaunchpads?.length > 0 && !config.screening.allowedLaunchpads?.includes(launchpad)) {
-        log("screening", `Skipping ${pool.name} — launchpad ${launchpad} not in allow-list`);
-        return false;
+    const passing = [];
+    const rejected = [];
+    for (const candidate of allCandidates) {
+      const reasons = getStrictRejectReasons(candidate.pool, candidate.ti);
+      if (reasons.length > 0) {
+        rejected.push({ ...candidate, reasons });
+        log("screening", `Skipping ${candidate.pool.name} — ${reasons.join("; ")}`);
+        continue;
       }
-      if (launchpad && config.screening.blockedLaunchpads?.includes(launchpad)) {
-        log("screening", `Skipping ${pool.name} — blocked launchpad (${launchpad})`);
-        return false;
-      }
-      const botPct = ti?.audit?.bot_holders_pct;
-      const maxBotHoldersPct = config.screening.maxBotHoldersPct;
-      if (botPct != null && maxBotHoldersPct != null && botPct > maxBotHoldersPct) {
-        log("screening", `Bot-holder filter: dropped ${pool.name} — bots ${botPct}% > ${maxBotHoldersPct}%`);
-        return false;
-      }
-      return true;
-    });
+      passing.push(candidate);
+    }
 
     if (passing.length === 0) {
-      screenReport = `No candidates available (all filtered by launchpad / holder-quality rules).`;
+      const nearMiss = rejected
+        .sort((a, b) => scoreRadarPool(b.pool) - scoreRadarPool(a.pool))
+        .slice(0, 5);
+      const best = nearMiss[0];
+      const rejectLines = nearMiss.length > 0
+        ? nearMiss.map((r, i) => `${i + 1}. ${r.pool.name} (${r.pool.pool}) — ${r.reasons.join("; ")}`).join("\n")
+        : "none";
+      const sourceLine = candidateSource === "radar"
+        ? "Strict shortlist empty, so radar fallback scanned soft candidates for visibility."
+        : "Strict shortlist found pools, but all failed deploy hard gates after token checks.";
+      screenReport = [
+        "No deploy candidates passed hard filters this cycle.",
+        sourceLine,
+        "",
+        "BEST LOOKING CANDIDATE",
+        best ? `${best.pool.name} (${best.pool.pool})` : "none",
+        "",
+        "WHY SKIPPED",
+        best ? best.reasons.join("; ") : "No candidate data available.",
+        "",
+        "RADAR NEAR-MISS",
+        rejectLines,
+      ].join("\n");
       return screenReport;
     }
 

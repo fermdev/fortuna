@@ -97,28 +97,44 @@ async function enrichPvpRisk(pools) {
  */
 export async function discoverPools({
   page_size = 50,
+  timeframe = config.screening.timeframe,
+  category = config.screening.category,
+  mode = "strict",
 } = {}) {
   const s = config.screening;
+  const isRadarMode = mode === "radar";
+  const minMcap = isRadarMode ? Math.max(50_000, Math.floor(Number(s.minMcap || 0) * 0.35)) : s.minMcap;
+  const maxMcap = isRadarMode && s.maxMcap != null ? Math.ceil(Number(s.maxMcap) * 1.5) : s.maxMcap;
+  const minHolders = isRadarMode ? Math.max(25, Math.floor(Number(s.minHolders || 0) * 0.25)) : s.minHolders;
+  const minVolume = isRadarMode ? Math.max(100, Math.floor(Number(s.minVolume || 0) * 0.2)) : s.minVolume;
+  const minTvl = isRadarMode ? Math.max(2_500, Math.floor(Number(s.minTvl || 0) * 0.25)) : s.minTvl;
+  const maxTvl = isRadarMode && s.maxTvl != null ? Math.ceil(Number(s.maxTvl) * 2) : s.maxTvl;
+  const minFeeActiveTvlRatio = isRadarMode
+    ? Math.max(0.01, Number(s.minFeeActiveTvlRatio || 0) * 0.2)
+    : s.minFeeActiveTvlRatio;
+  const minOrganic = isRadarMode ? Math.max(5, Math.floor(Number(s.minOrganic || 0) * 0.5)) : s.minOrganic;
+  const minQuoteOrganic = isRadarMode ? Math.max(20, Math.floor(Number(s.minQuoteOrganic || 0) * 0.5)) : s.minQuoteOrganic;
+
   const filters = [
     "base_token_has_critical_warnings=false",
     "quote_token_has_critical_warnings=false",
     s.excludeHighSupplyConcentration ? "base_token_has_high_supply_concentration=false" : null,
     "base_token_has_high_single_ownership=false",
     "pool_type=dlmm",
-    `base_token_market_cap>=${s.minMcap}`,
-    `base_token_market_cap<=${s.maxMcap}`,
-    `base_token_holders>=${s.minHolders}`,
-    `volume>=${s.minVolume}`,
-    `tvl>=${s.minTvl}`,
-    s.maxTvl != null ? `tvl<=${s.maxTvl}` : null,
+    `base_token_market_cap>=${minMcap}`,
+    maxMcap != null ? `base_token_market_cap<=${maxMcap}` : null,
+    `base_token_holders>=${minHolders}`,
+    `volume>=${minVolume}`,
+    `tvl>=${minTvl}`,
+    maxTvl != null ? `tvl<=${maxTvl}` : null,
     `dlmm_bin_step>=${s.minBinStep}`,
     `dlmm_bin_step<=${s.maxBinStep}`,
-    `fee_active_tvl_ratio>=${s.minFeeActiveTvlRatio}`,
-    `base_token_organic_score>=${s.minOrganic}`,
-    `quote_token_organic_score>=${s.minQuoteOrganic}`,
-    s.minTokenAgeHours != null ? `base_token_created_at<=${Date.now() - s.minTokenAgeHours * 3_600_000}` : null,
-    s.maxTokenAgeHours != null ? `base_token_created_at>=${Date.now() - s.maxTokenAgeHours * 3_600_000}` : null,
-    Array.isArray(s.allowedLaunchpads) && s.allowedLaunchpads.length > 0
+    `fee_active_tvl_ratio>=${minFeeActiveTvlRatio}`,
+    `base_token_organic_score>=${minOrganic}`,
+    `quote_token_organic_score>=${minQuoteOrganic}`,
+    !isRadarMode && s.minTokenAgeHours != null ? `base_token_created_at<=${Date.now() - s.minTokenAgeHours * 3_600_000}` : null,
+    !isRadarMode && s.maxTokenAgeHours != null ? `base_token_created_at>=${Date.now() - s.maxTokenAgeHours * 3_600_000}` : null,
+    !isRadarMode && Array.isArray(s.allowedLaunchpads) && s.allowedLaunchpads.length > 0
       ? `base_token_launchpad=[${s.allowedLaunchpads.join(",")}]`
       : null,
   ].filter(Boolean).join("&&");
@@ -126,8 +142,8 @@ export async function discoverPools({
   const url = `${POOL_DISCOVERY_BASE}/pools?` +
     `page_size=${page_size}` +
     `&filter_by=${encodeURIComponent(filters)}` +
-    `&timeframe=${s.timeframe}` +
-    `&category=${s.category}`;
+    `&timeframe=${timeframe}` +
+    `&category=${category}`;
 
   const res = await fetch(url, { signal: AbortSignal.timeout(25_000) });
 
@@ -200,7 +216,8 @@ export async function discoverPools({
  */
 export async function getTopCandidates({ limit = 10 } = {}) {
   const { config } = await import("../config.js");
-  const { pools } = await discoverPools({ page_size: 50 });
+  const scanDepth = Math.max(100, limit * 10);
+  const { pools } = await discoverPools({ page_size: scanDepth, mode: "strict" });
 
   // Exclude pools where the wallet already has an open position
   const { getMyPositions } = await import("./dlmm.js");
@@ -208,7 +225,7 @@ export async function getTopCandidates({ limit = 10 } = {}) {
   const occupiedPools = new Set(positions.map((p) => p.pool));
   const occupiedMints = new Set(positions.map((p) => p.base_mint).filter(Boolean));
 
-  const eligible = pools
+  const ranked = pools
     .filter((p) => {
       if (occupiedPools.has(p.pool) || occupiedMints.has(p.base?.mint)) return false;
       if (isPoolOnCooldown(p.pool)) {
@@ -221,7 +238,9 @@ export async function getTopCandidates({ limit = 10 } = {}) {
       }
       return true;
     })
-    .slice(0, limit);
+    .sort((a, b) => scoreCandidate(b) - scoreCandidate(a));
+  const enrichCount = Math.max(limit * 4, 20);
+  const eligible = ranked.slice(0, enrichCount);
 
   if (config.screening.avoidPvpSymbols && eligible.length > 0) {
     await enrichPvpRisk(eligible);
@@ -338,7 +357,7 @@ export async function getTopCandidates({ limit = 10 } = {}) {
   }
 
   return {
-    candidates: eligible,
+    candidates: eligible.slice(0, limit),
     total_screened: pools.length,
   };
 }
