@@ -403,6 +403,98 @@ async function runSafetyChecks(name, args) {
         };
       }
 
+      // Hard screening gates at deploy time (must hold even if shortlist/radar is wrong).
+      const baseMint = args.base_mint ?? poolDetail?.token_x?.address ?? null;
+      const poolMcap = toNum(poolDetail?.token_x?.market_cap);
+      let tokenInfo = null;
+      let tokenMcap = null;
+      let launchpad = null;
+      let botPct = null;
+      let top10Pct = null;
+      let feesSol = null;
+      let holders = null;
+      let organicScore = null;
+
+      if (baseMint) {
+        try {
+          const info = await getTokenInfo({ query: baseMint });
+          tokenInfo = info?.results?.find((r) => r?.mint === baseMint) ?? info?.results?.[0] ?? null;
+        } catch {
+          tokenInfo = null;
+        }
+      }
+
+      tokenMcap = toNum(tokenInfo?.mcap);
+      launchpad = tokenInfo?.launchpad ?? null;
+      botPct = toNum(tokenInfo?.audit?.bot_holders_pct);
+      top10Pct = toNum(tokenInfo?.audit?.top_holders_pct);
+      feesSol = toNum(tokenInfo?.global_fees_sol);
+      holders = toNum(tokenInfo?.holders ?? poolDetail?.base_token_holders);
+      organicScore = toNum(tokenInfo?.organic_score ?? poolDetail?.token_x?.organic_score);
+
+      const effectiveMcap = tokenMcap ?? poolMcap;
+      if (effectiveMcap == null) {
+        return {
+          pass: false,
+          reason: `Cannot verify market cap for ${args.pool_address}. Hard rule requires mcap >= ${config.screening.minMcap}.`,
+        };
+      }
+      if (effectiveMcap < Number(config.screening.minMcap || 0)) {
+        return {
+          pass: false,
+          reason: `Pool ${args.pool_address} rejected: mcap $${Math.round(effectiveMcap).toLocaleString("en-US")} is below minimum $${Number(config.screening.minMcap || 0).toLocaleString("en-US")}.`,
+        };
+      }
+      if (config.screening.maxMcap != null && effectiveMcap > Number(config.screening.maxMcap)) {
+        return {
+          pass: false,
+          reason: `Pool ${args.pool_address} rejected: mcap $${Math.round(effectiveMcap).toLocaleString("en-US")} is above maximum $${Number(config.screening.maxMcap).toLocaleString("en-US")}.`,
+        };
+      }
+
+      if (holders != null && holders < Number(config.screening.minHolders || 0)) {
+        return {
+          pass: false,
+          reason: `Pool ${args.pool_address} rejected: holders ${holders} is below minimum ${config.screening.minHolders}.`,
+        };
+      }
+      if (organicScore != null && organicScore < Number(config.screening.minOrganic || 0)) {
+        return {
+          pass: false,
+          reason: `Pool ${args.pool_address} rejected: organic score ${organicScore} is below minimum ${config.screening.minOrganic}.`,
+        };
+      }
+      if (feesSol != null && config.screening.minTokenFeesSol != null && feesSol < Number(config.screening.minTokenFeesSol)) {
+        return {
+          pass: false,
+          reason: `Pool ${args.pool_address} rejected: token global fees ${feesSol} SOL is below minimum ${config.screening.minTokenFeesSol} SOL.`,
+        };
+      }
+      if (botPct != null && config.screening.maxBotHoldersPct != null && botPct > Number(config.screening.maxBotHoldersPct)) {
+        return {
+          pass: false,
+          reason: `Pool ${args.pool_address} rejected: bot holders ${botPct}% exceeds maximum ${config.screening.maxBotHoldersPct}%.`,
+        };
+      }
+      if (top10Pct != null && config.screening.maxTop10Pct != null && top10Pct > Number(config.screening.maxTop10Pct)) {
+        return {
+          pass: false,
+          reason: `Pool ${args.pool_address} rejected: top10 holder concentration ${top10Pct}% exceeds maximum ${config.screening.maxTop10Pct}%.`,
+        };
+      }
+      if (launchpad && Array.isArray(config.screening.allowedLaunchpads) && config.screening.allowedLaunchpads.length > 0 && !config.screening.allowedLaunchpads.includes(launchpad)) {
+        return {
+          pass: false,
+          reason: `Pool ${args.pool_address} rejected: launchpad ${launchpad} is not in allowedLaunchpads.`,
+        };
+      }
+      if (launchpad && Array.isArray(config.screening.blockedLaunchpads) && config.screening.blockedLaunchpads.includes(launchpad)) {
+        return {
+          pass: false,
+          reason: `Pool ${args.pool_address} rejected: launchpad ${launchpad} is blocked.`,
+        };
+      }
+
       // Hard rule: never deploy to non-refundable pools.
       if (isNonRefundablePool(poolDetail)) {
         return {
@@ -590,4 +682,10 @@ function firstDefined(values) {
     if (v !== undefined && v !== null) return v;
   }
   return undefined;
+}
+
+function toNum(value) {
+  if (value == null || value === "") return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
 }
