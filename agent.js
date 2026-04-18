@@ -163,7 +163,13 @@ function isToolChoiceRequiredError(error) {
 export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHistory = [], agentType = "GENERAL", model = null, maxOutputTokens = null, options = {}) {
   const { interactive = false, onToolStart = null, onToolFinish = null } = options;
   // Build dynamic system prompt with current portfolio state
-  const [portfolio, positions] = await Promise.all([getWalletBalances(), getMyPositions()]);
+  // For chat/interactive requests, always force a fresh open-position read to avoid
+  // stale "already deployed" decisions right after a manual close.
+  const mustRefreshPositions = interactive || agentType === "SCREENER" || agentType === "MANAGER";
+  const [portfolio, positions] = await Promise.all([
+    getWalletBalances(),
+    getMyPositions({ force: mustRefreshPositions }),
+  ]);
   const stateSummary = getStateSummary();
   const lessons = getLessonsForPrompt({ agentType });
   const perfSummary = getPerformanceSummary();
