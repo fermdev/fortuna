@@ -949,8 +949,10 @@ async function telegramHandler(msg) {
   let liveMessage = null;
   try {
     log("telegram", `Incoming: ${text}`);
-    const hasCloseIntent = /\bclose\b|\bsell\b|\bexit\b|\bwithdraw\b/i.test(text);
-    const isDeployRequest = !hasCloseIntent && /\bdeploy\b|\bopen position\b|\blp into\b|\badd liquidity\b/i.test(text);
+    const hasCloseIntent = /\b(close|sell|exit|withdraw|tutup|keluar posisi|cabut)\b/i.test(text);
+    const hasNegatedDeployIntent = /\b(don['’]?t|do not|jangan|jgn|ga|gak|ngga|nggak|hindari|skip)\b.{0,40}\b(deploy|open position|lp into|add liquidity|masuk pool|buka posisi)\b/i.test(text)
+      || /\b(same pool|pool yang sama|pool sama|same token|token yang sama)\b/i.test(text);
+    const isDeployRequest = !hasCloseIntent && !hasNegatedDeployIntent && /\b(deploy|open position|lp into|add liquidity|buka posisi|masuk pool)\b/i.test(text);
     const agentRole = isDeployRequest ? "SCREENER" : "GENERAL";
     const agentModel = agentRole === "SCREENER" ? config.llm.screeningModel : config.llm.generalModel;
     liveMessage = await createLiveMessage("🤖 Live Update", `Request: ${text.slice(0, 240)}`);

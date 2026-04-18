@@ -28,11 +28,12 @@ const GENERAL_INTENT_ONLY_TOOLS = new Set([
 
 // Intent → tool subsets for GENERAL role
 const INTENT_TOOLS = {
-  deploy:      new Set(["deploy_position", "get_top_candidates", "get_active_bin", "get_pool_memory", "check_smart_wallets_on_pool", "get_token_holders", "get_token_narrative", "get_token_info", "search_pools", "get_wallet_balance", "get_my_positions", "add_pool_note"]),
+  deploy:      new Set(["deploy_position", "get_top_candidates", "get_active_bin", "get_pool_memory", "check_smart_wallets_on_pool", "get_token_holders", "get_token_narrative", "get_token_info", "search_pools", "get_wallet_balance", "get_my_positions", "add_pool_note", "add_lesson"]),
   close:       new Set(["close_position", "get_my_positions", "get_position_pnl", "get_wallet_balance", "swap_token"]),
   claim:       new Set(["claim_fees", "get_my_positions", "get_position_pnl", "get_wallet_balance"]),
   swap:        new Set(["swap_token", "get_wallet_balance"]),
   config:      new Set(["update_config"]),
+  policy:      new Set(["add_lesson", "list_lessons", "get_my_positions", "get_wallet_positions", "get_pool_memory", "add_pool_note"]),
   blocklist:   new Set(["add_to_blacklist", "remove_from_blacklist", "list_blacklist", "block_deployer", "unblock_deployer", "list_blocked_deployers", "get_token_info", "search_pools"]),
   selfupdate:  new Set(["self_update"]),
   balance:     new Set(["get_wallet_balance", "get_my_positions", "get_wallet_positions"]),
@@ -46,23 +47,34 @@ const INTENT_TOOLS = {
   lessons:     new Set(["add_lesson", "pin_lesson", "unpin_lesson", "list_lessons", "clear_lessons"]),
 };
 
+function normalizeGoalForIntent(goal = "") {
+  return String(goal)
+    .toLowerCase()
+    // Common Indonesian negations/slang => "dont"
+    .replace(/\b(jangan|jgn|ga|gak|ngga|nggak|g usah|tidak usah|tak usah)\b/g, "dont")
+    // Normalize common variations
+    .replace(/\bdon['’]t\b/g, "dont");
+}
+
 const INTENT_PATTERNS = [
-  { intent: "deploy",      re: /\b(deploy|open|add liquidity|lp into|invest in)\b/i },
-  { intent: "close",       re: /\b(close|exit|withdraw|remove liquidity|shut down)\b/i },
-  { intent: "claim",       re: /\b(claim|harvest|collect)\b.*\bfee/i },
-  { intent: "swap",        re: /\b(swap|convert|sell|exchange)\b/i },
-  { intent: "selfupdate",  re: /\b(self.?update|git pull|pull latest|update (the )?bot|update (the )?agent|update yourself)\b/i },
-  { intent: "blocklist",   re: /\b(blacklist|block|unblock|blocklist|blocked deployer|rugger|block dev|block deployer)\b/i },
-  { intent: "config",      re: /\b(config|setting|threshold|update|set |change)\b/i },
-  { intent: "balance",     re: /\b(balance|wallet|sol|how much)\b/i },
-  { intent: "positions",   re: /\b(position|portfolio|open|pnl|yield|range)\b/i },
+  { intent: "deploy",      re: /\b(deploy|open|add liquidity|lp into|invest in|pasang posisi|buka posisi|masuk pool|entry)\b/i },
+  { intent: "policy",      re: /\b(dont|do not|avoid|hindari|skip)\b.{0,40}\b(deploy|open|lp|liquidity|posisi|pool)\b/i },
+  { intent: "policy",      re: /\b(same pool|pool yang sama|pool sama|same token|token yang sama)\b/i },
+  { intent: "close",       re: /\b(close|exit|withdraw|remove liquidity|shut down|tutup|keluar posisi|cabut)\b/i },
+  { intent: "claim",       re: /\b(claim|harvest|collect|ambil)\b.*\bfee/i },
+  { intent: "swap",        re: /\b(swap|convert|sell|exchange|tukar|jual)\b/i },
+  { intent: "selfupdate",  re: /\b(self.?update|git pull|pull latest|update (the )?bot|update (the )?agent|update yourself|update bot|pull terbaru)\b/i },
+  { intent: "blocklist",   re: /\b(blacklist|block|unblock|blocklist|blocked deployer|rugger|block dev|block deployer|blokir)\b/i },
+  { intent: "config",      re: /\b(config|setting|threshold|update|set |change|aturan|rule|jangan deploy|jangan masuk)\b/i },
+  { intent: "balance",     re: /\b(balance|wallet|sol|how much|saldo|berapa sol)\b/i },
+  { intent: "positions",   re: /\b(position|portfolio|open|pnl|yield|range|posisi)\b/i },
   { intent: "strategy",    re: /\b(strategy|strategies)\b/i },
-  { intent: "screen",      re: /\b(screen|candidate|find pool|search|research|token)\b/i },
-  { intent: "memory",      re: /\b(memory|pool history|note|remember)\b/i },
-  { intent: "smartwallet", re: /\b(smart wallet|kol|whale|watch.?list|add wallet|remove wallet|list wallet|tracked wallet|check pool|who.?s in|wallets in|add to (smart|watch|kol))\b/i },
-  { intent: "study",       re: /\b(study top|top lpers?|best lpers?|who.?s lping|lp behavior|lpers?)\b/i },
-  { intent: "performance", re: /\b(performance|history|how.?s the bot|how.?s it doing|stats|report)\b/i },
-  { intent: "lessons",     re: /\b(lesson|learned|teach|pin|unpin|clear lesson|what did you learn)\b/i },
+  { intent: "screen",      re: /\b(screen|candidate|find pool|search|research|token|cari pool|riset)\b/i },
+  { intent: "memory",      re: /\b(memory|pool history|note|remember|catatan|ingat)\b/i },
+  { intent: "smartwallet", re: /\b(smart wallet|kol|whale|watch.?list|add wallet|remove wallet|list wallet|tracked wallet|check pool|who.?s in|wallets in|add to (smart|watch|kol)|dompet pintar)\b/i },
+  { intent: "study",       re: /\b(study top|top lpers?|best lpers?|who.?s lping|lp behavior|lpers?|pelajari lper)\b/i },
+  { intent: "performance", re: /\b(performance|history|how.?s the bot|how.?s it doing|stats|report|kinerja|riwayat)\b/i },
+  { intent: "lessons",     re: /\b(lesson|learned|teach|pin|unpin|clear lesson|what did you learn|pelajaran|yang dipelajari)\b/i },
 ];
 
 function getToolsForRole(agentType, goal = "") {
@@ -70,9 +82,10 @@ function getToolsForRole(agentType, goal = "") {
   if (agentType === "SCREENER") return tools.filter(t => SCREENER_TOOLS.has(t.function.name));
 
   // GENERAL: match intent from goal, combine matched tool sets
+  const normalizedGoal = normalizeGoalForIntent(goal);
   const matched = new Set();
   for (const { intent, re } of INTENT_PATTERNS) {
-    if (re.test(goal)) {
+    if (re.test(normalizedGoal)) {
       for (const t of INTENT_TOOLS[intent]) matched.add(t);
     }
   }
@@ -90,15 +103,16 @@ import { getLessonsForPrompt, getPerformanceSummary } from "./lessons.js";
 
 // Supports OpenRouter (default) or any OpenAI-compatible local server (e.g. LM Studio)
 // To use LM Studio: set LLM_BASE_URL=http://localhost:1234/v1 and LLM_API_KEY=lm-studio in .env
+// MiniMax token plan is also supported via MINIMAX_API_KEY.
 const client = new OpenAI({
   baseURL: process.env.LLM_BASE_URL || "https://openrouter.ai/api/v1",
-  apiKey: process.env.LLM_API_KEY || process.env.OPENROUTER_API_KEY,
+  apiKey: process.env.LLM_API_KEY || process.env.OPENROUTER_API_KEY || process.env.MINIMAX_API_KEY,
   timeout: 5 * 60 * 1000,
 });
 
 const DEFAULT_MODEL = process.env.LLM_MODEL || "openrouter/healer-alpha";
 
-const TOOL_REQUIRED_INTENTS = /\b(deploy|open position|open|add liquidity|lp into|invest in|close|exit|withdraw|remove liquidity|claim|harvest|collect|swap|convert|sell|exchange|block|unblock|blacklist|self.?update|pull latest|git pull|update yourself|config|setting|threshold|set |change|update |balance|wallet|position|portfolio|pnl|yield|range|screen|candidate|find pool|search|research|token|smart wallet|whale|watch.?list|tracked wallet|study top|top lpers?|lp behavior|who.?s lping|performance|history|stats|report|lesson|learned|teach|pin|unpin)\b/i;
+const TOOL_REQUIRED_INTENTS = /\b(deploy|open position|open|add liquidity|lp into|invest in|close|exit|withdraw|remove liquidity|claim|harvest|collect|swap|convert|sell|exchange|block|unblock|blacklist|self.?update|pull latest|git pull|update yourself|config|setting|threshold|set |change|update |balance|wallet|position|portfolio|pnl|yield|range|screen|candidate|find pool|search|research|token|smart wallet|whale|watch.?list|tracked wallet|study top|top lpers?|lp behavior|who.?s lping|performance|history|stats|report|lesson|learned|teach|pin|unpin|jangan|jgn|hindari|jangan deploy|buka posisi|tutup posisi|saldo|cari pool)\b/i;
 const CONFIG_READ_ONLY_INTENTS = /\b(check|show|what(?:'s| is)?|review|inspect|see)\b.*\b(config|settings?|thresholds?)\b/i;
 
 function shouldRequireRealToolUse(goal, agentType, interactive = false) {
@@ -188,7 +202,7 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
       let response;
       let usedModel = activeModel;
       // Force a tool call on step 0 for action intents — prevents the model from inventing deploy/close outcomes
-      const ACTION_INTENTS = /\b(deploy|open|add liquidity|close|exit|withdraw|claim|swap|block|unblock)\b/i;
+      const ACTION_INTENTS = /\b(deploy|open|add liquidity|close|exit|withdraw|claim|swap|block|unblock|buka posisi|tutup posisi|jangan deploy|hindari)\b/i;
       let toolChoice = (step === 0 && (ACTION_INTENTS.test(goal) || mustUseRealTool)) ? "required" : "auto";
 
       for (let attempt = 0; attempt < 3; attempt++) {
