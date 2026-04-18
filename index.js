@@ -85,6 +85,25 @@ function sanitizeUntrustedPromptText(text, maxLen = 500) {
   return cleaned ? JSON.stringify(cleaned) : null;
 }
 
+const SOLANA_ADDRESS_RE = /\b[1-9A-HJ-NP-Za-km-z]{32,44}\b/g;
+
+function extractFirstAddress(text) {
+  const matches = String(text || "").match(SOLANA_ADDRESS_RE) || [];
+  return matches[0] || null;
+}
+
+function buildPinnedPoolDeployGoal(userText, poolAddress) {
+  return `${userText}
+
+STRICT EXECUTION MODE:
+- User explicitly specified pool address: ${poolAddress}
+- Treat this as exact target pool.
+- Do NOT call get_top_candidates.
+- Do NOT deploy to any pool other than ${poolAddress}.
+- If this pool fails safety/risk guards, STOP and report the real blocked reason. Do not switch pools.
+- If deploying, call deploy_position with pool_address exactly ${poolAddress}.`;
+}
+
 function toNumber(value) {
   if (value == null || value === "") return null;
   const n = Number(value);
@@ -953,10 +972,14 @@ async function telegramHandler(msg) {
     const hasNegatedDeployIntent = /\b(don['’]?t|do not|jangan|jgn|ga|gak|ngga|nggak|hindari|skip)\b.{0,40}\b(deploy|open position|lp into|add liquidity|masuk pool|buka posisi)\b/i.test(text)
       || /\b(same pool|pool yang sama|pool sama|same token|token yang sama)\b/i.test(text);
     const isDeployRequest = !hasCloseIntent && !hasNegatedDeployIntent && /\b(deploy|open position|lp into|add liquidity|buka posisi|masuk pool)\b/i.test(text);
-    const agentRole = isDeployRequest ? "SCREENER" : "GENERAL";
+    const explicitPoolAddress = isDeployRequest ? extractFirstAddress(text) : null;
+    const targetedDeploy = Boolean(isDeployRequest && explicitPoolAddress);
+    const agentRole = isDeployRequest && !targetedDeploy ? "SCREENER" : "GENERAL";
     const agentModel = agentRole === "SCREENER" ? config.llm.screeningModel : config.llm.generalModel;
+    const routedGoal = targetedDeploy ? buildPinnedPoolDeployGoal(text, explicitPoolAddress) : text;
+    if (targetedDeploy) log("telegram", `Targeted deploy mode enabled for pool ${explicitPoolAddress}`);
     liveMessage = await createLiveMessage("🤖 Live Update", `Request: ${text.slice(0, 240)}`);
-    const { content } = await agentLoop(text, config.llm.maxSteps, sessionHistory, agentRole, agentModel, null, {
+    const { content } = await agentLoop(routedGoal, config.llm.maxSteps, sessionHistory, agentRole, agentModel, null, {
       interactive: true,
       onToolStart: async ({ name }) => { await liveMessage?.toolStart(name); },
       onToolFinish: async ({ name, result, success }) => { await liveMessage?.toolFinish(name, result, success); },
