@@ -125,6 +125,11 @@ function getStrictRejectReasons(pool, tokenInfo) {
   const botPct = toNumber(tokenInfo?.audit?.bot_holders_pct);
   const top10Pct = toNumber(tokenInfo?.audit?.top_holders_pct);
   const feesSol = toNumber(tokenInfo?.global_fees_sol);
+  const poolMcap = toNumber(pool?.mcap);
+  const tokenMcap = toNumber(tokenInfo?.mcap);
+  const effectiveMcap = tokenMcap ?? poolMcap;
+  const effectiveHolders = toNumber(tokenInfo?.holders ?? pool?.holders);
+  const effectiveOrganic = toNumber(tokenInfo?.organic_score ?? pool?.organic_score);
 
   if (toNumber(pool?.active_tvl) != null && toNumber(pool.active_tvl) < Number(s.minTvl || 0)) {
     reasons.push(`tvl ${pool.active_tvl} < ${s.minTvl}`);
@@ -135,8 +140,21 @@ function getStrictRejectReasons(pool, tokenInfo) {
   if (toNumber(pool?.fee_active_tvl_ratio) != null && toNumber(pool.fee_active_tvl_ratio) < Number(s.minFeeActiveTvlRatio || 0)) {
     reasons.push(`fee/tvl ${pool.fee_active_tvl_ratio} < ${s.minFeeActiveTvlRatio}`);
   }
-  if (toNumber(pool?.organic_score) != null && toNumber(pool.organic_score) < Number(s.minOrganic || 0)) {
-    reasons.push(`organic ${pool.organic_score} < ${s.minOrganic}`);
+  if (effectiveMcap == null) {
+    reasons.push(`mcap unknown`);
+  } else {
+    if (effectiveMcap < Number(s.minMcap || 0)) {
+      reasons.push(`mcap ${Math.round(effectiveMcap)} < ${s.minMcap}`);
+    }
+    if (s.maxMcap != null && effectiveMcap > Number(s.maxMcap)) {
+      reasons.push(`mcap ${Math.round(effectiveMcap)} > ${s.maxMcap}`);
+    }
+  }
+  if (effectiveHolders != null && effectiveHolders < Number(s.minHolders || 0)) {
+    reasons.push(`holders ${effectiveHolders} < ${s.minHolders}`);
+  }
+  if (effectiveOrganic != null && effectiveOrganic < Number(s.minOrganic || 0)) {
+    reasons.push(`organic ${effectiveOrganic} < ${s.minOrganic}`);
   }
   if (toNumber(pool?.token_age_hours) != null && s.minTokenAgeHours != null && toNumber(pool.token_age_hours) < Number(s.minTokenAgeHours)) {
     reasons.push(`age ${pool.token_age_hours}h < ${s.minTokenAgeHours}h`);
