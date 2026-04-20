@@ -955,8 +955,33 @@ export async function closePosition({ position_address, reason }) {
       base_mint: pool.lbPair.tokenXMint.toString(),
     };
   } catch (error) {
-    log("close_error", error.message);
-    return { success: false, error: error.message };
+    const message = String(error?.message || error || "");
+    // Some closes race against already-closed/stale position accounts and throw
+    // Anchor AccountOwnedByWrongProgram (often surfaced as custom error 0xbbf).
+    // If the position is no longer open, treat this as an idempotent close success.
+    if (isAlreadyClosedAccountError(message)) {
+      try {
+        _positionsCacheAt = 0;
+        const refreshed = await getMyPositions({ force: true, silent: true });
+        const stillOpen = refreshed?.positions?.some((p) => p.position === position_address);
+        if (!stillOpen) {
+          recordClose(position_address, `${reason || "agent decision"} (already closed/stale account)`);
+          log("close", `Position ${position_address} already closed (stale account error) — treating close as success`);
+          return {
+            success: true,
+            already_closed: true,
+            position: position_address,
+            pool: tracked?.pool || null,
+            message: "Position already closed (or stale account). Treated as successful close.",
+          };
+        }
+      } catch (verifyErr) {
+        log("close_warn", `Failed stale-close verification for ${position_address}: ${verifyErr.message}`);
+      }
+    }
+
+    log("close_error", message);
+    return { success: false, error: message };
   }
 }
 
@@ -984,4 +1009,12 @@ async function lookupPoolForPosition(position_address, walletAddress) {
   }
 
   throw new Error(`Position ${position_address} not found in open positions`);
+}
+
+function isAlreadyClosedAccountError(message = "") {
+  const m = String(message);
+  return /AccountOwnedByWrongProgram/i.test(m)
+    || /custom program error:\s*0xbbf/i.test(m)
+    || /Instruction:\s*ClosePosition2/i.test(m)
+    || /owned by a different program/i.test(m);
 }
