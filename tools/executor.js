@@ -9,7 +9,7 @@ import {
   closePosition,
   searchPools,
 } from "./dlmm.js";
-import { getWalletBalances, swapToken } from "./wallet.js";
+import { getWalletBalances, swapToken, normalizeMint } from "./wallet.js";
 import { studyTopLPers } from "./study.js";
 import { addLesson, clearAllLessons, clearPerformance, removeLessonsByKeyword, getPerformanceHistory, pinLesson, unpinLesson, listLessons } from "../lessons.js";
 import { setPositionInstruction } from "../state.js";
@@ -380,6 +380,7 @@ async function runSafetyChecks(name, args) {
           reason: "pool_address is required for deploy_position.",
         };
       }
+      args.pool_address = String(args.pool_address).trim();
       let poolDetail;
       try {
         poolDetail = await getPoolDetail({ pool_address: args.pool_address, timeframe: config.screening.timeframe });
@@ -405,6 +406,9 @@ async function runSafetyChecks(name, args) {
 
       // Hard screening gates at deploy time (must hold even if shortlist/radar is wrong).
       const baseMint = args.base_mint ?? poolDetail?.token_x?.address ?? null;
+      const quoteMint = args.quote_mint ?? poolDetail?.token_y?.address ?? null;
+      if (baseMint) args.base_mint = String(baseMint).trim();
+      if (quoteMint) args.quote_mint = String(quoteMint).trim();
       const poolMcap = toNum(poolDetail?.token_x?.market_cap);
       let tokenInfo = null;
       let tokenMcap = null;
@@ -555,14 +559,28 @@ async function runSafetyChecks(name, args) {
           reason: `Max positions (${config.risk.maxPositions}) reached. Close a position first.`,
         };
       }
+      const requestedPool = String(args.pool_address || "").trim();
       const alreadyInPool = positions.positions.some(
-        (p) => p.pool === args.pool_address
+        (p) => String(p.pool || "").trim() === requestedPool
       );
       if (alreadyInPool) {
         return {
           pass: false,
           reason: `Already have an open position in pool ${args.pool_address}. Cannot open duplicate.`,
         };
+      }
+
+      const requestedPairKey = canonicalPairKey(args.base_mint, args.quote_mint);
+      if (requestedPairKey) {
+        const existingPairPos = positions.positions.find(
+          (p) => canonicalPairKey(p.base_mint, p.quote_mint) === requestedPairKey
+        );
+        if (existingPairPos) {
+          return {
+            pass: false,
+            reason: `Already have an open position in pair ${args.base_mint}/${args.quote_mint} (pool ${existingPairPos.pool}). One position per pair is enforced.`,
+          };
+        }
       }
 
       // Block same base token across different pools
@@ -654,6 +672,13 @@ function binsForDrawdownPct(pct, binStepBps) {
   const step = Number(binStepBps) / 10_000;
   if (!(drawdown > 0 && drawdown < 1) || !(step > 0)) return NaN;
   return Math.ceil(Math.log(1 - drawdown) / Math.log(1 / (1 + step)));
+}
+
+function canonicalPairKey(mintA, mintB) {
+  if (!mintA || !mintB) return null;
+  const a = normalizeMint(String(mintA).trim());
+  const b = normalizeMint(String(mintB).trim());
+  return [a, b].sort().join("::");
 }
 
 function isNonRefundablePool(poolDetail = {}) {
