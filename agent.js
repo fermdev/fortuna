@@ -153,6 +153,46 @@ function isToolChoiceRequiredError(error) {
   return /tool_choice/i.test(message) && /required/i.test(message);
 }
 
+function recoverMinimaxToolCalls(msg, step = 0) {
+  if (!msg || msg.tool_calls?.length) return false;
+  const content = String(msg.content || "");
+  if (!/<minimax:tool_call>/i.test(content) || !/<invoke\s+name=/i.test(content)) return false;
+
+  const recovered = [];
+  const invokeRe = /<invoke\s+name="([^"]+)">([\s\S]*?)<\/invoke>/gi;
+  let invokeMatch;
+  while ((invokeMatch = invokeRe.exec(content)) !== null) {
+    const fnName = String(invokeMatch[1] || "").trim();
+    const body = invokeMatch[2] || "";
+    const args = {};
+    const paramRe = /<parameter[^>]*\bname="([^"]+)"[^>]*>([\s\S]*?)<\/parameter>/gi;
+    let paramMatch;
+    while ((paramMatch = paramRe.exec(body)) !== null) {
+      const key = String(paramMatch[1] || "").trim();
+      const value = String(paramMatch[2] || "").trim();
+      if (!key) continue;
+      // Coerce obvious number and boolean scalars from markup text.
+      if (/^-?\d+(\.\d+)?$/.test(value)) args[key] = Number(value);
+      else if (/^(true|false)$/i.test(value)) args[key] = /^true$/i.test(value);
+      else args[key] = value;
+    }
+    if (!fnName) continue;
+    recovered.push({
+      id: `minimax_recovered_${step}_${recovered.length}`,
+      type: "function",
+      function: {
+        name: fnName,
+        arguments: JSON.stringify(args),
+      },
+    });
+  }
+
+  if (!recovered.length) return false;
+  msg.tool_calls = recovered;
+  msg.content = null;
+  return true;
+}
+
 /**
  * Core ReAct agent loop.
  *
@@ -264,6 +304,10 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
       }
       // Repair malformed tool call JSON before pushing to history —
       // the API rejects the next request if history contains invalid JSON args
+      const recoveredFromMarkup = recoverMinimaxToolCalls(msg, step);
+      if (recoveredFromMarkup) {
+        log("warn", "Recovered MiniMax markup tool call(s) from assistant text content");
+      }
       if (msg.tool_calls) {
         for (const tc of msg.tool_calls) {
           if (tc.function?.arguments) {
