@@ -20,6 +20,7 @@ import { addToBlacklist, removeFromBlacklist, listBlacklist } from "../token-bla
 import { blockDev, unblockDev, listBlockedDevs } from "../dev-blocklist.js";
 import { addSmartWallet, removeSmartWallet, listSmartWallets, checkSmartWalletsOnPool } from "../smart-wallets.js";
 import { getTokenInfo, getTokenHolders, getTokenNarrative } from "./token.js";
+import { getPriceInfo } from "./okx.js";
 import { config, reloadScreeningThresholds } from "../config.js";
 import fs from "fs";
 import path from "path";
@@ -497,6 +498,27 @@ async function runSafetyChecks(name, args) {
           pass: false,
           reason: `Pool ${args.pool_address} rejected: launchpad ${launchpad} is blocked.`,
         };
+      }
+
+      // ATH guard at deploy-time (defense in depth): if configured, require enough
+      // drawdown from ATH before allowing a new position.
+      const athFilter = config.screening.athFilterPct;
+      if (athFilter != null && args.base_mint) {
+        try {
+          const priceInfo = await getPriceInfo(args.base_mint);
+          const pctOfAth = toNum(priceInfo?.price_vs_ath_pct);
+          if (pctOfAth != null) {
+            const threshold = 100 + Number(athFilter); // -30 => must be <= 70% of ATH
+            if (pctOfAth > threshold) {
+              return {
+                pass: false,
+                reason: `Pool ${args.pool_address} rejected: token is too close to ATH (${pctOfAth}% of ATH, requires <= ${threshold}% with athFilterPct=${athFilter}).`,
+              };
+            }
+          }
+        } catch (e) {
+          log("warn", `ATH deploy guard: could not fetch price info for ${args.base_mint.slice(0, 8)} — skipping ATH check (${e.message})`);
+        }
       }
 
       // Hard rule: never deploy to non-refundable pools.
