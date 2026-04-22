@@ -91,6 +91,11 @@ async function postTelegram(method, body) {
     });
     if (!res.ok) {
       const err = await res.text();
+      // Telegram returns 400 when editing a message with identical content/markup.
+      // This is harmless and common in live-update loops, so don't treat as an error.
+      if (res.status === 400 && /message is not modified/i.test(err)) {
+        return { ok: true, result: null, skipped: "not_modified" };
+      }
       log("telegram_error", `${method} ${res.status}: ${err.slice(0, 200)}`);
       return null;
     }
