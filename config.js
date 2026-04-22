@@ -4,10 +4,20 @@ import { fileURLToPath } from "url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const USER_CONFIG_PATH = path.join(__dirname, "user-config.json");
+const GMGN_CONFIG_PATH = path.join(__dirname, "gmgn-config.json");
+const DEFAULT_HIVEMIND_URL = "https://api.agentmeridian.xyz";
+const DEFAULT_AGENT_MERIDIAN_API_URL = "https://api.agentmeridian.xyz/api";
+const DEFAULT_AGENT_MERIDIAN_PUBLIC_KEY = "bWVyaWRpYW4taXMtdGhlLWJlc3QtYWdlbnRz";
+const DEFAULT_HIVEMIND_API_KEY = DEFAULT_AGENT_MERIDIAN_PUBLIC_KEY;
 
-const u = fs.existsSync(USER_CONFIG_PATH)
-  ? JSON.parse(fs.readFileSync(USER_CONFIG_PATH, "utf8"))
-  : {};
+function readJsonIfExists(filePath) {
+  return fs.existsSync(filePath)
+    ? JSON.parse(fs.readFileSync(filePath, "utf8"))
+    : {};
+}
+
+const u = readJsonIfExists(USER_CONFIG_PATH);
+const gmgnUserConfig = readJsonIfExists(GMGN_CONFIG_PATH);
 
 // Apply wallet/RPC from user-config if not already in env
 if (u.rpcUrl)    process.env.RPC_URL            ||= u.rpcUrl;
@@ -16,6 +26,32 @@ if (u.llmModel)  process.env.LLM_MODEL          ||= u.llmModel;
 if (u.llmBaseUrl) process.env.LLM_BASE_URL      ||= u.llmBaseUrl;
 if (u.llmApiKey)  process.env.LLM_API_KEY       ||= u.llmApiKey;
 if (u.dryRun !== undefined) process.env.DRY_RUN ||= String(u.dryRun);
+if (u.publicApiKey) process.env.PUBLIC_API_KEY ||= u.publicApiKey;
+if (u.agentMeridianApiUrl) process.env.AGENT_MERIDIAN_API_URL ||= u.agentMeridianApiUrl;
+if (gmgnUserConfig.apiKey || u.gmgnApiKey) {
+  process.env.GMGN_API_KEY ||= gmgnUserConfig.apiKey || u.gmgnApiKey;
+}
+
+const indicatorUserConfig = u.chartIndicators ?? {};
+
+function nonEmptyString(...values) {
+  for (const value of values) {
+    if (typeof value !== "string") continue;
+    const trimmed = value.trim();
+    if (trimmed) return trimmed;
+  }
+  return null;
+}
+
+function gmgnValue(key, legacyKey, fallback) {
+  return gmgnUserConfig[key] ?? u[legacyKey] ?? fallback;
+}
+
+function gmgnArray(key, legacyKey, fallback) {
+  if (Array.isArray(gmgnUserConfig[key])) return gmgnUserConfig[key];
+  if (Array.isArray(u[legacyKey])) return u[legacyKey];
+  return fallback;
+}
 
 export const config = {
   // ─── Risk Limits ─────────────────────────
@@ -26,6 +62,7 @@ export const config = {
 
   // ─── Pool Screening Thresholds ───────────
   screening: {
+    source:            u.screeningSource    ?? "meteora", // meteora | gmgn
     excludeHighSupplyConcentration: u.excludeHighSupplyConcentration ?? true,
     minFeeActiveTvlRatio: u.minFeeActiveTvlRatio ?? 0.05,
     minTvl:            u.minTvl            ?? 10_000,
@@ -41,6 +78,8 @@ export const config = {
     timeframe:         u.timeframe         ?? "5m",
     category:          u.category          ?? "trending",
     minTokenFeesSol:   u.minTokenFeesSol   ?? 30,  // global fees paid (priority+jito tips). below = bundled/scam
+    useDiscordSignals: u.useDiscordSignals ?? false,
+    discordSignalMode: u.discordSignalMode ?? "merge", // merge | only
     avoidPvpSymbols:   u.avoidPvpSymbols   ?? true, // avoid exact-symbol rivals with real active pools
     blockPvpSymbols:   u.blockPvpSymbols   ?? false, // hard-filter PVP rivals before the LLM sees them
     maxBundlePct:      u.maxBundlePct      ?? 30,  // max bundle holding % (OKX advanced-info)
@@ -53,6 +92,61 @@ export const config = {
     athFilterPct:       u.athFilterPct       ?? null, // e.g. -20 = only deploy if price is >= 20% below ATH
   },
 
+  gmgn: {
+    apiKey: nonEmptyString(gmgnUserConfig.apiKey, u.gmgnApiKey, process.env.GMGN_API_KEY),
+    baseUrl: nonEmptyString(gmgnUserConfig.baseUrl, u.gmgnBaseUrl, "https://openapi.gmgn.ai"),
+    interval: gmgnValue("interval", "gmgnInterval", "5m"),
+    orderBy: gmgnValue("orderBy", "gmgnOrderBy", "default"),
+    direction: gmgnValue("direction", "gmgnDirection", "desc"),
+    limit: gmgnValue("limit", "gmgnLimit", 100),
+    enrichLimit: gmgnValue("enrichLimit", "gmgnEnrichLimit", 20),
+    requestDelayMs: gmgnValue("requestDelayMs", "gmgnRequestDelayMs", 350),
+    maxRetries: gmgnValue("maxRetries", "gmgnMaxRetries", 2),
+    holdersLimit: gmgnValue("holdersLimit", "gmgnHoldersLimit", 100),
+    klineResolution: gmgnValue("klineResolution", "gmgnKlineResolution", "5m"),
+    klineLookbackMinutes: gmgnValue("klineLookbackMinutes", "gmgnKlineLookbackMinutes", 60),
+    filters: gmgnArray("filters", "gmgnFilters", ["renounced", "frozen", "not_wash_trading"]),
+    platforms: gmgnArray("platforms", "gmgnPlatforms", ["Pump.fun", "meteora_virtual_curve", "pool_meteora"]),
+    minMcap: gmgnValue("minMcap", "gmgnMinMcap", u.minMcap ?? 150_000),
+    maxMcap: gmgnValue("maxMcap", "gmgnMaxMcap", u.maxMcap ?? 10_000_000),
+    minTvl: gmgnValue("minTvl", "gmgnMinTvl", u.minTvl ?? 10_000),
+    minVolume: gmgnValue("minVolume", "gmgnMinVolume", 1000),
+    minHolders: gmgnValue("minHolders", "gmgnMinHolders", u.minHolders ?? 500),
+    minTokenAgeHours: gmgnValue("minTokenAgeHours", "gmgnMinTokenAgeHours", 2),
+    maxTokenAgeHours: gmgnValue("maxTokenAgeHours", "gmgnMaxTokenAgeHours", 24 * 7),
+    minSmartDegenCount: gmgnValue("minSmartDegenCount", "gmgnMinSmartDegenCount", 1),
+    requireKol: gmgnValue("requireKol", "gmgnRequireKol", true),
+    minKolCount: gmgnValue("minKolCount", "gmgnMinKolCount", 1),
+    maxRugRatio: gmgnValue("maxRugRatio", "gmgnMaxRugRatio", 0.3),
+    maxTop10HolderRate: gmgnValue("maxTop10HolderRate", "gmgnMaxTop10HolderRate", 0.5),
+    maxBundlerRate: gmgnValue("maxBundlerRate", "gmgnMaxBundlerRate", 0.5),
+    maxRatTraderRate: gmgnValue("maxRatTraderRate", "gmgnMaxRatTraderRate", 0.2),
+    maxFreshWalletRate: gmgnValue("maxFreshWalletRate", "gmgnMaxFreshWalletRate", 0.2),
+    maxDevTeamHoldRate: gmgnValue("maxDevTeamHoldRate", "gmgnMaxDevTeamHoldRate", 0.02),
+    preferredKolMinHoldPct: gmgnValue("preferredKolMinHoldPct", "gmgnPreferredKolMinHoldPct", 1),
+    dumpKolMinHoldPct: gmgnValue("dumpKolMinHoldPct", "gmgnDumpKolMinHoldPct", 0.5),
+    maxBotDegenRate: gmgnValue("maxBotDegenRate", "gmgnMaxBotDegenRate", 0.4),
+    maxSniperCount: gmgnValue("maxSniperCount", "gmgnMaxSniperCount", 20),
+    maxSniperHoldRate: gmgnValue("maxSniperHoldRate", "gmgnMaxSniperHoldRate", 0.3),
+    minTotalFeeSol: gmgnValue("minTotalFeeSol", "gmgnMinTotalFeeSol", 30),
+    athFilterPct: gmgnValue("athFilterPct", "gmgnAthFilterPct", null),
+    preferredKolNames: gmgnArray("preferredKolNames", "gmgnPreferredKolNames", []),
+    dumpKolNames: gmgnArray("dumpKolNames", "gmgnDumpKolNames", []),
+    indicatorFilter: gmgnValue("indicatorFilter", "gmgnIndicatorFilter", true),
+    indicatorInterval: gmgnValue("indicatorInterval", "gmgnIndicatorInterval", "15_MINUTE"),
+    indicatorRules: (() => {
+      const r = gmgnUserConfig.indicatorRules || {};
+      return {
+        requireBullishSupertrend: r.requireBullishSupertrend ?? true,
+        rejectAlreadyAtBottom:    r.rejectAlreadyAtBottom    ?? true,
+        requireAboveSupertrend:   r.requireAboveSupertrend   ?? false,
+        minRsi:                   r.minRsi                   ?? null,
+        maxRsi:                   r.maxRsi                   ?? null,
+        requireBbPosition:        r.requireBbPosition        ?? null,
+      };
+    })(),
+  },
+
   // ─── Position Management ────────────────
   management: {
     minClaimAmount:        u.minClaimAmount        ?? 5,
@@ -61,9 +155,14 @@ export const config = {
     outOfRangeWaitMinutes: u.outOfRangeWaitMinutes ?? 30,
     oorCooldownTriggerCount: u.oorCooldownTriggerCount ?? 3,
     oorCooldownHours:       u.oorCooldownHours       ?? 12,
+    repeatDeployCooldownEnabled: u.repeatDeployCooldownEnabled ?? true,
+    repeatDeployCooldownTriggerCount: u.repeatDeployCooldownTriggerCount ?? 3,
+    repeatDeployCooldownHours: u.repeatDeployCooldownHours ?? 12,
+    repeatDeployCooldownScope: u.repeatDeployCooldownScope ?? "token", // pool | token | both
+    repeatDeployCooldownMinFeeEarnedPct: u.repeatDeployCooldownMinFeeEarnedPct ?? u.repeatDeployCooldownMinFeeYieldPct ?? 0,
     minVolumeToRebalance:  u.minVolumeToRebalance  ?? 1000,
     stopLossPct:           u.stopLossPct           ?? u.emergencyPriceDropPct ?? -50,
-    takeProfitFeePct:      u.takeProfitFeePct      ?? 5,
+    takeProfitPct:         u.takeProfitPct         ?? u.takeProfitFeePct ?? 5,
     minFeePerTvl24h:       u.minFeePerTvl24h       ?? 7,
     minAgeBeforeYieldCheck: u.minAgeBeforeYieldCheck ?? 60, // minutes before low yield can trigger close
     minSolToOpen:          u.minSolToOpen          ?? 0.55,
@@ -81,8 +180,9 @@ export const config = {
 
   // ─── Strategy Mapping ───────────────────
   strategy: {
-    strategy:  u.strategy  ?? "bid_ask",
-    binsBelow: u.binsBelow ?? 69,
+    strategy:     u.strategy     ?? "bid_ask",
+    minBinsBelow: u.minBinsBelow ?? 35,
+    maxBinsBelow: u.maxBinsBelow ?? 69,
   },
 
   // ─── Scheduling ─────────────────────────
@@ -120,6 +220,44 @@ export const config = {
     USDC: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
     USDT: "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",
   },
+
+  // ─── HiveMind ─────────────────────────
+  hiveMind: {
+    url: nonEmptyString(u.hiveMindUrl, DEFAULT_HIVEMIND_URL),
+    apiKey: nonEmptyString(u.hiveMindApiKey, process.env.HIVEMIND_API_KEY, DEFAULT_HIVEMIND_API_KEY),
+    agentId: u.agentId ?? null,
+    pullMode: u.hiveMindPullMode ?? "auto",
+  },
+
+  api: {
+    url: nonEmptyString(u.agentMeridianApiUrl, process.env.AGENT_MERIDIAN_API_URL, DEFAULT_AGENT_MERIDIAN_API_URL),
+    publicApiKey: nonEmptyString(u.publicApiKey, process.env.PUBLIC_API_KEY, DEFAULT_AGENT_MERIDIAN_PUBLIC_KEY),
+    lpAgentRelayEnabled: u.lpAgentRelayEnabled ?? false,
+  },
+
+  jupiter: {
+    apiKey: process.env.JUPITER_API_KEY ?? "",
+    referralAccount:
+      process.env.JUPITER_REFERRAL_ACCOUNT ??
+      "9MzhDUnq3KxecyPzvhguQMMPbooXQ3VAoCMPDnoijwey",
+    referralFeeBps: Number(
+      process.env.JUPITER_REFERRAL_FEE_BPS ?? 50,
+    ),
+  },
+
+  indicators: {
+    enabled: indicatorUserConfig.enabled ?? false,
+    entryPreset: indicatorUserConfig.entryPreset ?? "supertrend_break",
+    exitPreset: indicatorUserConfig.exitPreset ?? "supertrend_break",
+    rsiLength: indicatorUserConfig.rsiLength ?? 2,
+    intervals: Array.isArray(indicatorUserConfig.intervals)
+      ? indicatorUserConfig.intervals
+      : ["5_MINUTE"],
+    candles: indicatorUserConfig.candles ?? 298,
+    rsiOversold: indicatorUserConfig.rsiOversold ?? 30,
+    rsiOverbought: indicatorUserConfig.rsiOverbought ?? 80,
+    requireAllIntervals: indicatorUserConfig.requireAllIntervals ?? false,
+  },
 };
 
 /**
@@ -151,11 +289,13 @@ export function computeDeployAmount(walletSol) {
  * agent cycle uses the evolved values without a restart.
  */
 export function reloadScreeningThresholds() {
-  if (!fs.existsSync(USER_CONFIG_PATH)) return;
   try {
-    const fresh = JSON.parse(fs.readFileSync(USER_CONFIG_PATH, "utf8"));
+    const fresh = readJsonIfExists(USER_CONFIG_PATH);
     const s = config.screening;
+    if (fresh.screeningSource != null) s.source = fresh.screeningSource;
     if (fresh.minFeeActiveTvlRatio != null) s.minFeeActiveTvlRatio = fresh.minFeeActiveTvlRatio;
+    if (fresh.useDiscordSignals !== undefined) s.useDiscordSignals = fresh.useDiscordSignals;
+    if (fresh.discordSignalMode != null) s.discordSignalMode = fresh.discordSignalMode;
     if (fresh.excludeHighSupplyConcentration !== undefined) s.excludeHighSupplyConcentration = fresh.excludeHighSupplyConcentration;
     if (fresh.minOrganic     != null) s.minOrganic     = fresh.minOrganic;
     if (fresh.minQuoteOrganic != null) s.minQuoteOrganic = fresh.minQuoteOrganic;
@@ -178,5 +318,13 @@ export function reloadScreeningThresholds() {
     if (fresh.maxBotHoldersPct  != null) s.maxBotHoldersPct = fresh.maxBotHoldersPct;
     if (fresh.allowedLaunchpads !== undefined) s.allowedLaunchpads = fresh.allowedLaunchpads;
     if (fresh.blockedLaunchpads !== undefined) s.blockedLaunchpads = fresh.blockedLaunchpads;
+  } catch { /* ignore */ }
+  try {
+    const freshGmgn = readJsonIfExists(GMGN_CONFIG_PATH);
+    const g = config.gmgn;
+    for (const [key, value] of Object.entries(freshGmgn)) {
+      if (key in g && key !== "apiKey") g[key] = value;
+    }
+    if (freshGmgn.apiKey) g.apiKey = freshGmgn.apiKey;
   } catch { /* ignore */ }
 }

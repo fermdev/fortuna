@@ -14,7 +14,8 @@
   "positionSizePct": 0.35,
 
   "strategy": "bid_ask",
-  "binsBelow": 69,
+  "minBinsBelow": 35,
+  "maxBinsBelow": 69,
 
   "timeframe": "5m",
   "category": "trending",
@@ -31,6 +32,8 @@
   "maxBinStep": 125,
   "minFeeActiveTvlRatio": 0.05,
   "minTokenFeesSol": 30,
+  "useDiscordSignals": false,
+  "discordSignalMode": "merge",
   "avoidPvpSymbols": true,
   "blockPvpSymbols": false,
   "maxBundlePct": 30,
@@ -41,6 +44,7 @@
   "minTokenAgeHours": null,
   "maxTokenAgeHours": null,
   "athFilterPct": null,
+  "screeningSource": "meteora",
 
   "minClaimAmount": 5,
   "autoSwapAfterClaim": false,
@@ -51,7 +55,7 @@
   "minVolumeToRebalance": 1000,
   "stopLossPct": -50,
   "emergencyPriceDropPct": -50,
-  "takeProfitFeePct": 5,
+  "takeProfitPct": 5,
   "minFeePerTvl24h": 7,
   "minAgeBeforeYieldCheck": 60,
   "trailingTakeProfit": true,
@@ -80,7 +84,23 @@
   "darwinCeiling": 2.5,
   "darwinMinSamples": 10,
 
+  "agentId": "",
+  "publicApiKey": "",
+  "agentMeridianApiUrl": "https://api.agentmeridian.xyz/api",
+  "lpAgentRelayEnabled": false,
+  "chartIndicators": {
+    "enabled": false,
+    "entryPreset": "supertrend_break",
+    "exitPreset": "supertrend_break",
+    "rsiLength": 2,
+    "intervals": ["5_MINUTE"],
+    "candles": 298,
+    "rsiOversold": 30,
+    "rsiOverbought": 80,
+    "requireAllIntervals": false
+  },
   "telegramChatId": "",
   "hiveMindUrl": "",
-  "hiveMindApiKey": ""
+  "hiveMindApiKey": "",
+  "hiveMindPullMode": "auto"
 }

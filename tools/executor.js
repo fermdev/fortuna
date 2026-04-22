@@ -9,7 +9,7 @@ import {
   closePosition,
   searchPools,
 } from "./dlmm.js";
-import { getWalletBalances, swapToken, normalizeMint } from "./wallet.js";
+import { getWalletBalances, swapToken } from "./wallet.js";
 import { studyTopLPers } from "./study.js";
 import { addLesson, clearAllLessons, clearPerformance, removeLessonsByKeyword, getPerformanceHistory, pinLesson, unpinLesson, listLessons } from "../lessons.js";
 import { setPositionInstruction } from "../state.js";
@@ -20,8 +20,8 @@ import { addToBlacklist, removeFromBlacklist, listBlacklist } from "../token-bla
 import { blockDev, unblockDev, listBlockedDevs } from "../dev-blocklist.js";
 import { addSmartWallet, removeSmartWallet, listSmartWallets, checkSmartWalletsOnPool } from "../smart-wallets.js";
 import { getTokenInfo, getTokenHolders, getTokenNarrative } from "./token.js";
-import { getPriceInfo } from "./okx.js";
 import { config, reloadScreeningThresholds } from "../config.js";
+import { getRecentDecisions } from "../decision-log.js";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -29,8 +29,26 @@ import { execSync, spawn } from "child_process";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const USER_CONFIG_PATH = path.join(__dirname, "../user-config.json");
+const GMGN_CONFIG_PATH = path.join(__dirname, "../gmgn-config.json");
 import { log, logAction } from "../logger.js";
 import { notifyDeploy, notifyClose, notifySwap } from "../telegram.js";
+
+const SENSITIVE_CONFIG_KEYS = new Set([
+  "gmgnApiKey",
+  "hiveMindApiKey",
+  "publicApiKey",
+]);
+
+function redactConfigValue(key, value) {
+  if (!SENSITIVE_CONFIG_KEYS.has(key)) return value;
+  return typeof value === "string" && value ? "***redacted***" : value;
+}
+
+function redactAppliedConfig(applied) {
+  return Object.fromEntries(
+    Object.entries(applied || {}).map(([key, value]) => [key, redactConfigValue(key, value)]),
+  );
+}
 
 // Registered by index.js so update_config can restart cron jobs when intervals change
 let _cronRestarter = null;
@@ -87,6 +105,7 @@ const toolMap = {
     }
   },
   get_performance_history: getPerformanceHistory,
+  get_recent_decisions: ({ limit } = {}) => ({ decisions: getRecentDecisions(limit || 6) }),
   add_strategy:        addStrategy,
   list_strategies:     listStrategies,
   get_strategy:        getStrategy,
@@ -130,6 +149,7 @@ const toolMap = {
     // Flat key → config section mapping (covers everything in config.js)
     const CONFIG_MAP = {
       // screening
+      screeningSource: ["screening", "source"],
       minFeeActiveTvlRatio: ["screening", "minFeeActiveTvlRatio"],
       excludeHighSupplyConcentration: ["screening", "excludeHighSupplyConcentration"],
       minTvl: ["screening", "minTvl"],
@@ -145,6 +165,8 @@ const toolMap = {
       timeframe: ["screening", "timeframe"],
       category: ["screening", "category"],
       minTokenFeesSol: ["screening", "minTokenFeesSol"],
+      useDiscordSignals: ["screening", "useDiscordSignals"],
+      discordSignalMode: ["screening", "discordSignalMode"],
       avoidPvpSymbols: ["screening", "avoidPvpSymbols"],
       blockPvpSymbols: ["screening", "blockPvpSymbols"],
       maxBundlePct:     ["screening", "maxBundlePct"],
@@ -163,29 +185,110 @@ const toolMap = {
       outOfRangeWaitMinutes: ["management", "outOfRangeWaitMinutes"],
       oorCooldownTriggerCount: ["management", "oorCooldownTriggerCount"],
       oorCooldownHours: ["management", "oorCooldownHours"],
+      repeatDeployCooldownEnabled: ["management", "repeatDeployCooldownEnabled"],
+      repeatDeployCooldownTriggerCount: ["management", "repeatDeployCooldownTriggerCount"],
+      repeatDeployCooldownHours: ["management", "repeatDeployCooldownHours"],
+      repeatDeployCooldownScope: ["management", "repeatDeployCooldownScope"],
+      repeatDeployCooldownMinFeeEarnedPct: ["management", "repeatDeployCooldownMinFeeEarnedPct"],
       minVolumeToRebalance: ["management", "minVolumeToRebalance"],
       stopLossPct: ["management", "stopLossPct"],
-      takeProfitFeePct: ["management", "takeProfitFeePct"],
+      takeProfitPct: ["management", "takeProfitPct"],
+      takeProfitFeePct: ["management", "takeProfitPct"],
       trailingTakeProfit: ["management", "trailingTakeProfit"],
       trailingTriggerPct: ["management", "trailingTriggerPct"],
       trailingDropPct: ["management", "trailingDropPct"],
+      pnlSanityMaxDiffPct: ["management", "pnlSanityMaxDiffPct"],
       solMode: ["management", "solMode"],
       minSolToOpen: ["management", "minSolToOpen"],
       deployAmountSol: ["management", "deployAmountSol"],
       gasReserve: ["management", "gasReserve"],
       positionSizePct: ["management", "positionSizePct"],
+      minAgeBeforeYieldCheck: ["management", "minAgeBeforeYieldCheck"],
       // risk
       maxPositions: ["risk", "maxPositions"],
       maxDeployAmount: ["risk", "maxDeployAmount"],
       // schedule
       managementIntervalMin: ["schedule", "managementIntervalMin"],
       screeningIntervalMin: ["schedule", "screeningIntervalMin"],
+      healthCheckIntervalMin: ["schedule", "healthCheckIntervalMin"],
       // models
       managementModel: ["llm", "managementModel"],
       screeningModel: ["llm", "screeningModel"],
       generalModel: ["llm", "generalModel"],
+      temperature: ["llm", "temperature"],
+      maxTokens: ["llm", "maxTokens"],
+      maxSteps: ["llm", "maxSteps"],
       // strategy
-      binsBelow: ["strategy", "binsBelow"],
+      strategy:     ["strategy", "strategy"],
+      minBinsBelow: ["strategy", "minBinsBelow"],
+      maxBinsBelow: ["strategy", "maxBinsBelow"],
+      // hivemind
+      hiveMindUrl: ["hiveMind", "url"],
+      hiveMindApiKey: ["hiveMind", "apiKey"],
+      agentId: ["hiveMind", "agentId"],
+      hiveMindPullMode: ["hiveMind", "pullMode"],
+      // meridian api / relay
+      publicApiKey: ["api", "publicApiKey"],
+      agentMeridianApiUrl: ["api", "url"],
+      lpAgentRelayEnabled: ["api", "lpAgentRelayEnabled"],
+      // GMGN screening
+      gmgnApiKey: ["gmgn", "apiKey"],
+      gmgnBaseUrl: ["gmgn", "baseUrl"],
+      gmgnInterval: ["gmgn", "interval"],
+      gmgnOrderBy: ["gmgn", "orderBy"],
+      gmgnDirection: ["gmgn", "direction"],
+      gmgnLimit: ["gmgn", "limit"],
+      gmgnEnrichLimit: ["gmgn", "enrichLimit"],
+      gmgnRequestDelayMs: ["gmgn", "requestDelayMs"],
+      gmgnMaxRetries: ["gmgn", "maxRetries"],
+      gmgnHoldersLimit: ["gmgn", "holdersLimit"],
+      gmgnKlineResolution: ["gmgn", "klineResolution"],
+      gmgnKlineLookbackMinutes: ["gmgn", "klineLookbackMinutes"],
+      gmgnFilters: ["gmgn", "filters"],
+      gmgnPlatforms: ["gmgn", "platforms"],
+      gmgnMinMcap: ["gmgn", "minMcap"],
+      gmgnMaxMcap: ["gmgn", "maxMcap"],
+      gmgnMinVolume: ["gmgn", "minVolume"],
+      gmgnMinHolders: ["gmgn", "minHolders"],
+      gmgnMinTokenAgeHours: ["gmgn", "minTokenAgeHours"],
+      gmgnMaxTokenAgeHours: ["gmgn", "maxTokenAgeHours"],
+      gmgnAthFilterPct: ["gmgn", "athFilterPct"],
+      gmgnMaxTop10HolderRate: ["gmgn", "maxTop10HolderRate"],
+      gmgnMaxBundlerRate: ["gmgn", "maxBundlerRate"],
+      gmgnMaxRatTraderRate: ["gmgn", "maxRatTraderRate"],
+      gmgnMaxFreshWalletRate: ["gmgn", "maxFreshWalletRate"],
+      gmgnMaxDevTeamHoldRate: ["gmgn", "maxDevTeamHoldRate"],
+      gmgnMaxBotDegenRate: ["gmgn", "maxBotDegenRate"],
+      gmgnMaxSniperCount: ["gmgn", "maxSniperCount"],
+      gmgnMaxSniperHoldRate: ["gmgn", "maxSniperHoldRate"],
+      gmgnPreferredKolNames: ["gmgn", "preferredKolNames"],
+      gmgnPreferredKolMinHoldPct: ["gmgn", "preferredKolMinHoldPct"],
+      gmgnDumpKolNames: ["gmgn", "dumpKolNames"],
+      gmgnDumpKolMinHoldPct: ["gmgn", "dumpKolMinHoldPct"],
+      gmgnRequireKol: ["gmgn", "requireKol"],
+      gmgnMinKolCount: ["gmgn", "minKolCount"],
+      gmgnMinSmartDegenCount: ["gmgn", "minSmartDegenCount"],
+      gmgnMinTotalFeeSol: ["gmgn", "minTotalFeeSol"],
+      gmgnRejectSingleVolumeSpike: ["gmgn", "rejectSingleVolumeSpike"],
+      gmgnMaxSingleCandleVolumeShare: ["gmgn", "maxSingleCandleVolumeShare"],
+      gmgnIndicatorFilter: ["gmgn", "indicatorFilter"],
+      gmgnIndicatorInterval: ["gmgn", "indicatorInterval"],
+      gmgnRequireBullishSt: ["gmgn", "indicatorRules", "requireBullishSupertrend"],
+      gmgnRejectAtBottom: ["gmgn", "indicatorRules", "rejectAlreadyAtBottom"],
+      gmgnRequireAboveSt: ["gmgn", "indicatorRules", "requireAboveSupertrend"],
+      gmgnMinRsi: ["gmgn", "indicatorRules", "minRsi"],
+      gmgnMaxRsi: ["gmgn", "indicatorRules", "maxRsi"],
+      gmgnRequireBbPosition: ["gmgn", "indicatorRules", "requireBbPosition"],
+      // chart indicators
+      chartIndicatorsEnabled: ["indicators", "enabled", ["chartIndicators", "enabled"]],
+      indicatorEntryPreset: ["indicators", "entryPreset", ["chartIndicators", "entryPreset"]],
+      indicatorExitPreset: ["indicators", "exitPreset", ["chartIndicators", "exitPreset"]],
+      rsiLength: ["indicators", "rsiLength", ["chartIndicators", "rsiLength"]],
+      indicatorIntervals: ["indicators", "intervals", ["chartIndicators", "intervals"]],
+      indicatorCandles: ["indicators", "candles", ["chartIndicators", "candles"]],
+      rsiOversold: ["indicators", "rsiOversold", ["chartIndicators", "rsiOversold"]],
+      rsiOverbought: ["indicators", "rsiOverbought", ["chartIndicators", "rsiOverbought"]],
+      requireAllIntervals: ["indicators", "requireAllIntervals", ["chartIndicators", "requireAllIntervals"]],
     };
 
     const applied = {};
@@ -209,20 +312,68 @@ const toolMap = {
 
     // Apply to live config immediately
     for (const [key, val] of Object.entries(applied)) {
-      const [section, field] = CONFIG_MAP[key];
-      const before = config[section][field];
-      config[section][field] = val;
-      log("config", `update_config: config.${section}.${field} ${before} → ${val} (verify: ${config[section][field]})`);
+      const [section, field, third] = CONFIG_MAP[key];
+      const isNestedField = typeof third === "string"; // string = nested subfield, array = persistPath
+      if (isNestedField) {
+        if (!config[section][field] || typeof config[section][field] !== "object") config[section][field] = {};
+        const before = config[section][field][third];
+        config[section][field][third] = val;
+        log("config", `update_config: config.${section}.${field}.${third} ${redactConfigValue(key, before)} → ${redactConfigValue(key, val)}`);
+      } else {
+        const before = config[section][field];
+        config[section][field] = val;
+        log("config", `update_config: config.${section}.${field} ${redactConfigValue(key, before)} → ${redactConfigValue(key, val)} (verify: ${redactConfigValue(key, config[section][field])})`);
+      }
     }
 
-    // Persist to user-config.json
+    // Persist GMGN tuning to gmgn-config.json, and everything else to user-config.json.
     let userConfig = {};
     if (fs.existsSync(USER_CONFIG_PATH)) {
       try { userConfig = JSON.parse(fs.readFileSync(USER_CONFIG_PATH, "utf8")); } catch { /**/ }
     }
-    Object.assign(userConfig, applied);
-    userConfig._lastAgentTune = new Date().toISOString();
-    fs.writeFileSync(USER_CONFIG_PATH, JSON.stringify(userConfig, null, 2));
+    let gmgnConfig = {};
+    if (fs.existsSync(GMGN_CONFIG_PATH)) {
+      try { gmgnConfig = JSON.parse(fs.readFileSync(GMGN_CONFIG_PATH, "utf8")); } catch { /**/ }
+    }
+    let wroteUserConfig = false;
+    let wroteGmgnConfig = false;
+    for (const [key, val] of Object.entries(applied)) {
+      const [section, field, third] = CONFIG_MAP[key] || [];
+      const persistPath = Array.isArray(third) ? third : null;
+      const nestedField = typeof third === "string" ? third : null;
+      if (section === "gmgn") {
+        if (nestedField) {
+          if (!gmgnConfig[field] || typeof gmgnConfig[field] !== "object") gmgnConfig[field] = {};
+          gmgnConfig[field][nestedField] = val;
+        } else {
+          gmgnConfig[field] = val;
+        }
+        wroteGmgnConfig = true;
+        continue;
+      }
+      if (Array.isArray(persistPath) && persistPath.length > 0) {
+        let target = userConfig;
+        for (const part of persistPath.slice(0, -1)) {
+          if (!target[part] || typeof target[part] !== "object" || Array.isArray(target[part])) {
+            target[part] = {};
+          }
+          target = target[part];
+        }
+        target[persistPath[persistPath.length - 1]] = val;
+      } else {
+        userConfig[key] = val;
+      }
+      wroteUserConfig = true;
+    }
+    const tunedAt = new Date().toISOString();
+    if (wroteUserConfig) {
+      userConfig._lastAgentTune = tunedAt;
+      fs.writeFileSync(USER_CONFIG_PATH, JSON.stringify(userConfig, null, 2));
+    }
+    if (wroteGmgnConfig) {
+      gmgnConfig._lastAgentTune = tunedAt;
+      fs.writeFileSync(GMGN_CONFIG_PATH, JSON.stringify(gmgnConfig, null, 2));
+    }
 
     // Restart cron jobs if intervals changed
     const intervalChanged = applied.managementIntervalMin != null || applied.screeningIntervalMin != null;
@@ -238,12 +389,12 @@ const toolMap = {
       k => k !== "managementIntervalMin" && k !== "screeningIntervalMin"
     );
     if (lessonsKeys.length > 0) {
-      const summary = lessonsKeys.map(k => `${k}=${applied[k]}`).join(", ");
+      const summary = lessonsKeys.map(k => `${k}=${redactConfigValue(k, applied[k])}`).join(", ");
       addLesson(`[SELF-TUNED] Changed ${summary} — ${reason}`, ["self_tune", "config_change"]);
     }
 
-    log("config", `Agent self-tuned: ${JSON.stringify(applied)} — ${reason}`);
-    return { success: true, applied, unknown, reason };
+    log("config", `Agent self-tuned: ${JSON.stringify(redactAppliedConfig(applied))} — ${reason}`);
+    return { success: true, applied: redactAppliedConfig(applied), unknown, reason };
   },
 };
 
@@ -291,9 +442,6 @@ export async function executeTool(name, args) {
   // ─── Execute ──────────────────────────────
   try {
     const result = await fn(args);
-    if (result && typeof result === "object" && typeof result.error === "string") {
-      result.error = sanitizeToolErrorMessage(result.error);
-    }
     const duration = Date.now() - startTime;
     const success = result?.success !== false && !result?.error;
 
@@ -309,7 +457,7 @@ export async function executeTool(name, args) {
       if (name === "swap_token" && result.tx) {
         notifySwap({ inputSymbol: args.input_mint?.slice(0, 8), outputSymbol: args.output_mint === "So11111111111111111111111111111111111111112" || args.output_mint === "SOL" ? "SOL" : args.output_mint?.slice(0, 8), amountIn: result.amount_in, amountOut: result.amount_out, tx: result.tx }).catch(() => {});
       } else if (name === "deploy_position") {
-        notifyDeploy({ pair: result.pool_name || args.pool_name || args.pool_address?.slice(0, 8), amountSol: args.amount_y ?? args.amount_sol ?? 0, position: result.position, tx: result.txs?.[0] ?? result.tx, priceRange: result.price_range, binStep: result.bin_step, baseFee: result.base_fee }).catch(() => {});
+        notifyDeploy({ pair: result.pool_name || args.pool_name || args.pool_address?.slice(0, 8), amountSol: args.amount_y ?? args.amount_sol ?? 0, position: result.position, tx: result.txs?.[0] ?? result.tx, priceRange: result.price_range, rangeCoverage: result.range_coverage, binStep: result.bin_step, baseFee: result.base_fee }).catch(() => {});
       } else if (name === "close_position") {
         notifyClose({ pair: result.pool_name || args.position_address?.slice(0, 8), pnlUsd: result.pnl_usd ?? 0, pnlPct: result.pnl_pct ?? 0 }).catch(() => {});
         // Note low-yield closes in pool memory so screener avoids redeploying
@@ -351,19 +499,18 @@ export async function executeTool(name, args) {
     return result;
   } catch (error) {
     const duration = Date.now() - startTime;
-    const normalizedError = sanitizeToolErrorMessage(error.message);
 
     logAction({
       tool: name,
       args,
-      error: normalizedError,
+      error: error.message,
       duration_ms: duration,
       success: false,
     });
 
     // Return error to LLM so it can decide what to do
     return {
-      error: normalizedError,
+      error: error.message,
       tool: name,
     };
   }
@@ -375,206 +522,14 @@ export async function executeTool(name, args) {
 async function runSafetyChecks(name, args) {
   switch (name) {
     case "deploy_position": {
-      args = args || {};
-      // Hard TVL floor: never deploy to pools with 0/unknown TVL.
-      // Always verify using fresh pool detail before any on-chain action.
-      const minTvl = Math.max(10_000, Number(config.screening.minTvl || 0));
-      if (!args.pool_address) {
-        return {
-          pass: false,
-          reason: "pool_address is required for deploy_position.",
-        };
-      }
-      args.pool_address = String(args.pool_address).trim();
-      let poolDetail;
-      try {
-        poolDetail = await getPoolDetail({ pool_address: args.pool_address, timeframe: config.screening.timeframe });
-      } catch (e) {
-        return {
-          pass: false,
-          reason: `Cannot verify pool TVL for ${args.pool_address}. get_pool_detail failed: ${e.message}`,
-        };
-      }
-      const activeTvl = Number(poolDetail?.active_tvl ?? poolDetail?.tvl ?? 0);
-      if (!(activeTvl > 0)) {
-        return {
-          pass: false,
-          reason: `Pool ${args.pool_address} rejected: TVL is 0 or unavailable. Hard rule forbids deploy.`,
-        };
-      }
-      if (activeTvl < minTvl) {
-        return {
-          pass: false,
-          reason: `Pool ${args.pool_address} rejected: TVL $${activeTvl.toLocaleString("en-US")} is below hard minimum $${minTvl.toLocaleString("en-US")}.`,
-        };
-      }
-
-      // Hard screening gates at deploy time (must hold even if shortlist/radar is wrong).
-      const baseMint = args.base_mint ?? poolDetail?.token_x?.address ?? null;
-      const quoteMint = args.quote_mint ?? poolDetail?.token_y?.address ?? null;
-      if (baseMint) args.base_mint = String(baseMint).trim();
-      if (quoteMint) args.quote_mint = String(quoteMint).trim();
-      const poolMcap = toNum(poolDetail?.token_x?.market_cap);
-      let tokenInfo = null;
-      let tokenMcap = null;
-      let launchpad = null;
-      let botPct = null;
-      let top10Pct = null;
-      let feesSol = null;
-      let holders = null;
-      let organicScore = null;
-
-      if (baseMint) {
-        try {
-          const info = await getTokenInfo({ query: baseMint });
-          tokenInfo = info?.results?.find((r) => r?.mint === baseMint) ?? info?.results?.[0] ?? null;
-        } catch {
-          tokenInfo = null;
-        }
-      }
-
-      tokenMcap = toNum(tokenInfo?.mcap);
-      launchpad = tokenInfo?.launchpad ?? null;
-      botPct = toNum(tokenInfo?.audit?.bot_holders_pct);
-      top10Pct = toNum(tokenInfo?.audit?.top_holders_pct);
-      feesSol = toNum(tokenInfo?.global_fees_sol);
-      holders = toNum(tokenInfo?.holders ?? poolDetail?.base_token_holders);
-      organicScore = toNum(tokenInfo?.organic_score ?? poolDetail?.token_x?.organic_score);
-
-      const effectiveMcap = tokenMcap ?? poolMcap;
-      if (effectiveMcap == null) {
-        return {
-          pass: false,
-          reason: `Cannot verify market cap for ${args.pool_address}. Hard rule requires mcap >= ${config.screening.minMcap}.`,
-        };
-      }
-      if (effectiveMcap < Number(config.screening.minMcap || 0)) {
-        return {
-          pass: false,
-          reason: `Pool ${args.pool_address} rejected: mcap $${Math.round(effectiveMcap).toLocaleString("en-US")} is below minimum $${Number(config.screening.minMcap || 0).toLocaleString("en-US")}.`,
-        };
-      }
-      if (config.screening.maxMcap != null && effectiveMcap > Number(config.screening.maxMcap)) {
-        return {
-          pass: false,
-          reason: `Pool ${args.pool_address} rejected: mcap $${Math.round(effectiveMcap).toLocaleString("en-US")} is above maximum $${Number(config.screening.maxMcap).toLocaleString("en-US")}.`,
-        };
-      }
-
-      if (holders != null && holders < Number(config.screening.minHolders || 0)) {
-        return {
-          pass: false,
-          reason: `Pool ${args.pool_address} rejected: holders ${holders} is below minimum ${config.screening.minHolders}.`,
-        };
-      }
-      if (organicScore != null && organicScore < Number(config.screening.minOrganic || 0)) {
-        return {
-          pass: false,
-          reason: `Pool ${args.pool_address} rejected: organic score ${organicScore} is below minimum ${config.screening.minOrganic}.`,
-        };
-      }
-      if (feesSol != null && config.screening.minTokenFeesSol != null && feesSol < Number(config.screening.minTokenFeesSol)) {
-        return {
-          pass: false,
-          reason: `Pool ${args.pool_address} rejected: token global fees ${feesSol} SOL is below minimum ${config.screening.minTokenFeesSol} SOL.`,
-        };
-      }
-      if (botPct != null && config.screening.maxBotHoldersPct != null && botPct > Number(config.screening.maxBotHoldersPct)) {
-        return {
-          pass: false,
-          reason: `Pool ${args.pool_address} rejected: bot holders ${botPct}% exceeds maximum ${config.screening.maxBotHoldersPct}%.`,
-        };
-      }
-      if (top10Pct != null && config.screening.maxTop10Pct != null && top10Pct > Number(config.screening.maxTop10Pct)) {
-        return {
-          pass: false,
-          reason: `Pool ${args.pool_address} rejected: top10 holder concentration ${top10Pct}% exceeds maximum ${config.screening.maxTop10Pct}%.`,
-        };
-      }
-      if (launchpad && Array.isArray(config.screening.allowedLaunchpads) && config.screening.allowedLaunchpads.length > 0 && !config.screening.allowedLaunchpads.includes(launchpad)) {
-        return {
-          pass: false,
-          reason: `Pool ${args.pool_address} rejected: launchpad ${launchpad} is not in allowedLaunchpads.`,
-        };
-      }
-      if (launchpad && Array.isArray(config.screening.blockedLaunchpads) && config.screening.blockedLaunchpads.includes(launchpad)) {
-        return {
-          pass: false,
-          reason: `Pool ${args.pool_address} rejected: launchpad ${launchpad} is blocked.`,
-        };
-      }
-
-      // ATH guard at deploy-time (defense in depth): if configured, require enough
-      // drawdown from ATH before allowing a new position.
-      const athFilter = config.screening.athFilterPct;
-      if (athFilter != null && args.base_mint) {
-        try {
-          const priceInfo = await getPriceInfo(args.base_mint);
-          const pctOfAth = toNum(priceInfo?.price_vs_ath_pct);
-          if (pctOfAth != null) {
-            const threshold = 100 + Number(athFilter); // -30 => must be <= 70% of ATH
-            if (pctOfAth > threshold) {
-              return {
-                pass: false,
-                reason: `Pool ${args.pool_address} rejected: token is too close to ATH (${pctOfAth}% of ATH, requires <= ${threshold}% with athFilterPct=${athFilter}).`,
-              };
-            }
-          }
-        } catch (e) {
-          log("warn", `ATH deploy guard: could not fetch price info for ${args.base_mint.slice(0, 8)} — skipping ATH check (${e.message})`);
-        }
-      }
-
-      // Hard rule: never deploy to non-refundable pools.
-      if (isNonRefundablePool(poolDetail)) {
-        return {
-          pass: false,
-          reason: `Pool ${args.pool_address} rejected: non-refundable pool is not allowed by hard rule.`,
-        };
-      }
-
-      // Hard rule: always use bid_ask and keep max price at active bin.
-      args.strategy = "bid_ask";
-      args.bins_above = 0;
-
       // Reject pools with bin_step out of configured range
       const minStep = config.screening.minBinStep;
       const maxStep = config.screening.maxBinStep;
-      const binStep = Number(args.bin_step ?? poolDetail?.dlmm_params?.bin_step ?? poolDetail?.bin_step ?? NaN);
-      if (!Number.isFinite(binStep)) {
+      if (args.bin_step != null && (args.bin_step < minStep || args.bin_step > maxStep)) {
         return {
           pass: false,
-          reason: `Cannot verify bin_step for pool ${args.pool_address}.`,
+          reason: `bin_step ${args.bin_step} is outside the allowed range of [${minStep}-${maxStep}].`,
         };
-      }
-      args.bin_step = binStep;
-      if (binStep < minStep || binStep > maxStep) {
-        return {
-          pass: false,
-          reason: `bin_step ${binStep} is outside the allowed range of [${minStep}-${maxStep}].`,
-        };
-      }
-
-      // Hard rule: min price range must be between -40% and -70%.
-      const minBinsBelow = binsForDrawdownPct(40, binStep);
-      const maxBinsBelow = binsForDrawdownPct(70, binStep);
-      if (args.bins_below == null) {
-        // Default to midpoint drawdown (-55%) when caller omits bins.
-        args.bins_below = binsForDrawdownPct(55, binStep);
-      } else {
-        const binsBelow = Number(args.bins_below);
-        if (!Number.isFinite(binsBelow)) {
-          return {
-            pass: false,
-            reason: `bins_below must be a number.`,
-          };
-        }
-        if (binsBelow < minBinsBelow || binsBelow > maxBinsBelow) {
-          return {
-            pass: false,
-            reason: `bins_below ${binsBelow} is outside required range for this bin_step (${binStep}): use ${minBinsBelow}-${maxBinsBelow} bins (min price -40% to -70%).`,
-          };
-        }
       }
 
       // Check position count limit + duplicate pool guard — force fresh scan to avoid stale cache
@@ -585,28 +540,14 @@ async function runSafetyChecks(name, args) {
           reason: `Max positions (${config.risk.maxPositions}) reached. Close a position first.`,
         };
       }
-      const requestedPool = String(args.pool_address || "").trim();
       const alreadyInPool = positions.positions.some(
-        (p) => String(p.pool || "").trim() === requestedPool
+        (p) => p.pool === args.pool_address
       );
       if (alreadyInPool) {
         return {
           pass: false,
           reason: `Already have an open position in pool ${args.pool_address}. Cannot open duplicate.`,
         };
-      }
-
-      const requestedPairKey = canonicalPairKey(args.base_mint, args.quote_mint);
-      if (requestedPairKey) {
-        const existingPairPos = positions.positions.find(
-          (p) => canonicalPairKey(p.base_mint, p.quote_mint) === requestedPairKey
-        );
-        if (existingPairPos) {
-          return {
-            pass: false,
-            reason: `Already have an open position in pair ${args.base_mint}/${args.quote_mint} (pool ${existingPairPos.pool}). One position per pair is enforced.`,
-          };
-        }
       }
 
       // Block same base token across different pools
@@ -674,6 +615,12 @@ async function runSafetyChecks(name, args) {
           reason: "self_update is disabled by default. Set ALLOW_SELF_UPDATE=true locally if you really want to enable it.",
         };
       }
+      if (!process.stdin.isTTY) {
+        return {
+          pass: false,
+          reason: "self_update is only allowed from a local interactive TTY session, not from Telegram or background automation.",
+        };
+      }
       return { pass: true };
     }
 
@@ -691,74 +638,4 @@ function summarizeResult(result) {
     return str.slice(0, 1000) + "...(truncated)";
   }
   return result;
-}
-
-function binsForDrawdownPct(pct, binStepBps) {
-  const drawdown = Number(pct) / 100;
-  const step = Number(binStepBps) / 10_000;
-  if (!(drawdown > 0 && drawdown < 1) || !(step > 0)) return NaN;
-  return Math.ceil(Math.log(1 - drawdown) / Math.log(1 / (1 + step)));
-}
-
-function canonicalPairKey(mintA, mintB) {
-  if (!mintA || !mintB) return null;
-  const a = normalizeMint(String(mintA).trim());
-  const b = normalizeMint(String(mintB).trim());
-  return [a, b].sort().join("::");
-}
-
-function isNonRefundablePool(poolDetail = {}) {
-  // Defensive key scan because upstream payload field naming can vary.
-  const refundable = firstDefined([
-    poolDetail?.is_refundable,
-    poolDetail?.refundable,
-    poolDetail?.fee_refundable,
-    poolDetail?.is_fee_refundable,
-    poolDetail?.dlmm_params?.is_refundable,
-    poolDetail?.dlmm_params?.fee_refundable,
-  ]);
-  const nonRefundable = firstDefined([
-    poolDetail?.non_refundable,
-    poolDetail?.is_non_refundable,
-    poolDetail?.dlmm_params?.non_refundable,
-    poolDetail?.dlmm_params?.is_non_refundable,
-  ]);
-  if (nonRefundable === true) return true;
-  if (refundable === false) return true;
-  return false;
-}
-
-function firstDefined(values) {
-  for (const v of values) {
-    if (v !== undefined && v !== null) return v;
-  }
-  return undefined;
-}
-
-function toNum(value) {
-  if (value == null || value === "") return null;
-  const n = Number(value);
-  return Number.isFinite(n) ? n : null;
-}
-
-function sanitizeToolErrorMessage(message) {
-  const raw = String(message || "").trim();
-  if (!raw) return "Unknown tool error";
-
-  const lower = raw.toLowerCase();
-  const looksLikeHtml = raw.includes("<!DOCTYPE html") || raw.includes("<html");
-  const cloudflareChallenge =
-    lower.includes("just a moment") ||
-    lower.includes("challenges.cloudflare.com") ||
-    lower.includes("enable javascript and cookies");
-
-  if (looksLikeHtml && cloudflareChallenge) {
-    return "GMGN API returned a Cloudflare challenge (rate-limited/IP temporarily blocked). Retry later or increase gmgnRequestDelayMs.";
-  }
-
-  if (looksLikeHtml) {
-    return "Upstream API returned an HTML error page instead of JSON.";
-  }
-
-  return raw.length > 500 ? `${raw.slice(0, 500)}...` : raw;
 }
