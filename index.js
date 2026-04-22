@@ -757,10 +757,9 @@ IMPORTANT:
         onToolStart: async ({ name }) => { await liveMessage?.toolStart(name); },
         onToolFinish: async ({ name, result, success }) => { await liveMessage?.toolFinish(name, result, success); },
       });
-    const screeningSource = String(config.screening?.source || config.screeningSource || "").toLowerCase();
-    screenReport = screeningSource === "gmgn"
-      ? normalizeGmgnScreeningReport(content)
-      : content;
+    // Force GMGN-only formatting whenever the model output contains GMGN funnel text.
+    // This avoids mixed reports like "NO DEPLOY/BEST LOOKING CANDIDATE" + GMGN stages.
+    screenReport = normalizeGmgnScreeningReport(content);
   } catch (error) {
     log("cron_error", `Screening cycle failed: ${error.message}`);
     screenReport = `Screening cycle failed: ${error.message}`;
