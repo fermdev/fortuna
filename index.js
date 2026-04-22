@@ -74,6 +74,20 @@ function stripThink(text) {
   return text.replace(/<think>[\s\S]*?<\/think>/gi, "").trim();
 }
 
+function normalizeGmgnScreeningReport(text) {
+  if (!text) return text;
+  const raw = String(text);
+  const funnelIdx = raw.indexOf("GMGN funnel:");
+  if (funnelIdx < 0) return raw;
+
+  const noCandidatesIdx = raw.indexOf("No candidates available.");
+  const noCandidatesLine = (noCandidatesIdx >= 0 && noCandidatesIdx < funnelIdx)
+    ? "No candidates available.\n\n"
+    : "";
+
+  return `${noCandidatesLine}${raw.slice(funnelIdx).trim()}`;
+}
+
 function sanitizeUntrustedPromptText(text, maxLen = 500) {
   if (!text) return null;
   const cleaned = String(text)
@@ -743,7 +757,10 @@ IMPORTANT:
         onToolStart: async ({ name }) => { await liveMessage?.toolStart(name); },
         onToolFinish: async ({ name, result, success }) => { await liveMessage?.toolFinish(name, result, success); },
       });
-    screenReport = content;
+    const screeningSource = String(config.screening?.source || config.screeningSource || "").toLowerCase();
+    screenReport = screeningSource === "gmgn"
+      ? normalizeGmgnScreeningReport(content)
+      : content;
   } catch (error) {
     log("cron_error", `Screening cycle failed: ${error.message}`);
     screenReport = `Screening cycle failed: ${error.message}`;
