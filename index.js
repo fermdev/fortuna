@@ -6,7 +6,7 @@ import { log } from "./logger.js";
 import { getMyPositions, closePosition, getActiveBin } from "./tools/dlmm.js";
 import { getWalletBalances } from "./tools/wallet.js";
 import { getTopCandidates } from "./tools/screening.js";
-import { formatGmgnCandidateForPrompt } from "./tools/gmgn.js";
+import { formatGmgnCandidateForPrompt, getGmgnCooldownState } from "./tools/gmgn.js";
 import { config, reloadScreeningThresholds, computeDeployAmount } from "./config.js";
 import { evolveThresholds, getPerformanceSummary } from "./lessons.js";
 import { executeTool, registerCronRestarter } from "./tools/executor.js";
@@ -434,7 +434,13 @@ export async function runScreeningCycle({ silent = false } = {}) {
     // Fetch top candidates, then recon each sequentially with a small delay to avoid 429s
     const topCandidates = await getTopCandidates({ limit: 10 }).catch((e) => ({ _error: e.message }));
     if (topCandidates?._error) {
-      screenReport = `Screening failed: ${topCandidates._error}`;
+      const source = String(config.screening.source || "meteora").toLowerCase();
+      const cooldown = getGmgnCooldownState();
+      if (source === "gmgn" && cooldown.active) {
+        screenReport = `GMGN cooldown active. Skipping screening for ${cooldown.remainingMinutes}m after ${cooldown.reason}.`;
+      } else {
+        screenReport = `Screening failed: ${topCandidates._error}`;
+      }
       return screenReport;
     }
     const candidates = (topCandidates?.candidates || topCandidates?.pools || []).slice(0, 10);

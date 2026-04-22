@@ -10,6 +10,8 @@ setDefaultResultOrder("ipv4first");
 const METEORA_DLMM_API = "https://dlmm.datapi.meteora.ag";
 const SUPPORTED_INTERVALS = new Set(["1m", "5m", "1h", "6h", "24h"]);
 let lastGmgnRequestAt = 0;
+let gmgnCooldownUntil = 0;
+let gmgnCooldownReason = null;
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -49,6 +51,11 @@ function appendParams(url, params = {}) {
 }
 
 async function gmgnFetch(pathname, { method = "GET", params = {}, body = null } = {}) {
+  const cooldown = getGmgnCooldownState();
+  if (cooldown.active) {
+    throw new Error(`GMGN cooldown active for ${cooldown.remainingMinutes}m: ${cooldown.reason}`);
+  }
+
   const baseUrl = String(config.gmgn?.baseUrl || "https://openapi.gmgn.ai").replace(/\/+$/, "");
   const url = new URL(`${baseUrl}${pathname}`);
   appendParams(url, {
@@ -77,7 +84,13 @@ async function gmgnFetch(pathname, { method = "GET", params = {}, body = null } 
     }
     const message = normalizeGmgnErrorMessage(payload?.message || payload?.error || payload?.raw || `GMGN ${pathname} ${res.status}`);
     const rateLimited = res.status === 429 || /rate limit|temporarily banned/i.test(String(message));
+    const cloudflareChallenge = isCloudflareChallengeMessage(message);
     if (res.ok) return payload;
+    if (cloudflareChallenge) {
+      armGmgnCooldown("cloudflare challenge", Number(config.gmgn?.cooldownMinutes ?? 30));
+    } else if (rateLimited) {
+      armGmgnCooldown("rate limit", Number(config.gmgn?.rateLimitCooldownMinutes ?? 10));
+    }
     if (rateLimited && attempt < maxRetries) {
       const retryAfter = Number(res.headers.get("retry-after"));
       const backoffMs = Number.isFinite(retryAfter)
@@ -98,10 +111,7 @@ function normalizeGmgnErrorMessage(raw) {
   if (!text) return "Unknown GMGN error";
   const lower = text.toLowerCase();
   const looksLikeHtml = text.includes("<!DOCTYPE html") || text.includes("<html");
-  const isCloudflareChallenge =
-    lower.includes("just a moment") ||
-    lower.includes("challenges.cloudflare.com") ||
-    lower.includes("enable javascript and cookies");
+  const isCloudflareChallenge = isCloudflareChallengeMessage(text);
 
   if (looksLikeHtml && isCloudflareChallenge) {
     return "GMGN API Cloudflare challenge/rate-limit triggered. Retry after cooldown or increase gmgnRequestDelayMs.";
@@ -110,6 +120,36 @@ function normalizeGmgnErrorMessage(raw) {
     return "GMGN API returned HTML instead of JSON.";
   }
   return text.length > 500 ? `${text.slice(0, 500)}...` : text;
+}
+
+function isCloudflareChallengeMessage(raw) {
+  const lower = String(raw || "").toLowerCase();
+  return (
+    lower.includes("just a moment") ||
+    lower.includes("challenges.cloudflare.com") ||
+    lower.includes("enable javascript and cookies") ||
+    lower.includes("cloudflare challenge")
+  );
+}
+
+function armGmgnCooldown(reason, minutes) {
+  const safeMinutes = Math.max(1, Number(minutes) || 1);
+  const until = Date.now() + safeMinutes * 60_000;
+  if (until > gmgnCooldownUntil) {
+    gmgnCooldownUntil = until;
+    gmgnCooldownReason = reason;
+    log("gmgn", `Cooldown armed for ${safeMinutes}m (${reason})`);
+  }
+}
+
+export function getGmgnCooldownState() {
+  const remainingMs = Math.max(0, gmgnCooldownUntil - Date.now());
+  return {
+    active: remainingMs > 0,
+    remainingMs,
+    remainingMinutes: Math.ceil(remainingMs / 60_000),
+    reason: gmgnCooldownReason || "cooldown",
+  };
 }
 
 function unwrapList(payload, keys = ["list", "rank", "data"]) {
