@@ -88,6 +88,25 @@ function normalizeGmgnScreeningReport(text) {
   return `${noCandidatesLine}${raw.slice(funnelIdx).trim()}`;
 }
 
+function summarizeScreeningError(message) {
+  const raw = String(message || "").trim();
+  if (!raw) return "Unknown screening error";
+  const lower = raw.toLowerCase();
+  const looksLikeHtml = raw.includes("<!DOCTYPE html") || raw.includes("<html");
+  const cloudflareChallenge =
+    lower.includes("just a moment") ||
+    lower.includes("challenges.cloudflare.com") ||
+    lower.includes("enable javascript and cookies");
+
+  if (looksLikeHtml && cloudflareChallenge) {
+    return "GMGN API rate-limit/Cloudflare challenge detected. Screening skipped this cycle; retry next interval.";
+  }
+  if (looksLikeHtml) {
+    return "Upstream API returned HTML instead of JSON during screening.";
+  }
+  return raw.length > 500 ? `${raw.slice(0, 500)}...` : raw;
+}
+
 function sanitizeUntrustedPromptText(text, maxLen = 500) {
   if (!text) return null;
   const cleaned = String(text)
@@ -520,8 +539,9 @@ export async function runScreeningCycle({ silent = false } = {}) {
       return screenReport;
     }
   } catch (e) {
-    log("cron_error", `Screening pre-check failed: ${e.message}`);
-    screenReport = `Screening pre-check failed: ${e.message}`;
+    const err = summarizeScreeningError(e.message);
+    log("cron_error", `Screening pre-check failed: ${err}`);
+    screenReport = `Screening pre-check failed: ${err}`;
     _screeningBusy = false;
     return screenReport;
   }
@@ -761,8 +781,9 @@ IMPORTANT:
     // This avoids mixed reports like "NO DEPLOY/BEST LOOKING CANDIDATE" + GMGN stages.
     screenReport = normalizeGmgnScreeningReport(content);
   } catch (error) {
-    log("cron_error", `Screening cycle failed: ${error.message}`);
-    screenReport = `Screening cycle failed: ${error.message}`;
+    const err = summarizeScreeningError(error.message);
+    log("cron_error", `Screening cycle failed: ${err}`);
+    screenReport = `Screening cycle failed: ${err}`;
   } finally {
     _screeningBusy = false;
     if (!silent && telegramEnabled()) {

@@ -291,6 +291,9 @@ export async function executeTool(name, args) {
   // ─── Execute ──────────────────────────────
   try {
     const result = await fn(args);
+    if (result && typeof result === "object" && typeof result.error === "string") {
+      result.error = sanitizeToolErrorMessage(result.error);
+    }
     const duration = Date.now() - startTime;
     const success = result?.success !== false && !result?.error;
 
@@ -348,18 +351,19 @@ export async function executeTool(name, args) {
     return result;
   } catch (error) {
     const duration = Date.now() - startTime;
+    const normalizedError = sanitizeToolErrorMessage(error.message);
 
     logAction({
       tool: name,
       args,
-      error: error.message,
+      error: normalizedError,
       duration_ms: duration,
       success: false,
     });
 
     // Return error to LLM so it can decide what to do
     return {
-      error: error.message,
+      error: normalizedError,
       tool: name,
     };
   }
@@ -735,4 +739,26 @@ function toNum(value) {
   if (value == null || value === "") return null;
   const n = Number(value);
   return Number.isFinite(n) ? n : null;
+}
+
+function sanitizeToolErrorMessage(message) {
+  const raw = String(message || "").trim();
+  if (!raw) return "Unknown tool error";
+
+  const lower = raw.toLowerCase();
+  const looksLikeHtml = raw.includes("<!DOCTYPE html") || raw.includes("<html");
+  const cloudflareChallenge =
+    lower.includes("just a moment") ||
+    lower.includes("challenges.cloudflare.com") ||
+    lower.includes("enable javascript and cookies");
+
+  if (looksLikeHtml && cloudflareChallenge) {
+    return "GMGN API returned a Cloudflare challenge (rate-limited/IP temporarily blocked). Retry later or increase gmgnRequestDelayMs.";
+  }
+
+  if (looksLikeHtml) {
+    return "Upstream API returned an HTML error page instead of JSON.";
+  }
+
+  return raw.length > 500 ? `${raw.slice(0, 500)}...` : raw;
 }
