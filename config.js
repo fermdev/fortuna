@@ -89,7 +89,7 @@ export const config = {
     blockedLaunchpads:  u.blockedLaunchpads  ?? [],  // e.g. ["letsbonk.fun", "pump.fun"]
     minTokenAgeHours:   u.minTokenAgeHours   ?? null, // null = no minimum
     maxTokenAgeHours:   u.maxTokenAgeHours   ?? null, // null = no maximum
-    athFilterPct:       u.athFilterPct       ?? null, // e.g. -20 = only deploy if price is >= 20% below ATH
+    athFilterPct:       u.athFilterPct       ?? null, // e.g. -30 = only deploy if price is <= 70% of ATH
   },
 
   gmgn: {
@@ -129,7 +129,7 @@ export const config = {
     maxSniperCount: gmgnValue("maxSniperCount", "gmgnMaxSniperCount", 20),
     maxSniperHoldRate: gmgnValue("maxSniperHoldRate", "gmgnMaxSniperHoldRate", 0.3),
     minTotalFeeSol: gmgnValue("minTotalFeeSol", "gmgnMinTotalFeeSol", 30),
-    athFilterPct: gmgnValue("athFilterPct", "gmgnAthFilterPct", null),
+    athFilterPct: gmgnValue("athFilterPct", "gmgnAthFilterPct", null), // e.g. -30 = only deploy if price is <= 70% of ATH
     preferredKolNames: gmgnArray("preferredKolNames", "gmgnPreferredKolNames", []),
     dumpKolNames: gmgnArray("dumpKolNames", "gmgnDumpKolNames", []),
     indicatorFilter: gmgnValue("indicatorFilter", "gmgnIndicatorFilter", true),

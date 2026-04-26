@@ -20,6 +20,7 @@ import { addToBlacklist, removeFromBlacklist, listBlacklist } from "../token-bla
 import { blockDev, unblockDev, listBlockedDevs } from "../dev-blocklist.js";
 import { addSmartWallet, removeSmartWallet, listSmartWallets, checkSmartWalletsOnPool } from "../smart-wallets.js";
 import { getTokenInfo, getTokenHolders, getTokenNarrative } from "./token.js";
+import { getPriceInfo } from "./okx.js";
 import { config, reloadScreeningThresholds } from "../config.js";
 import { getRecentDecisions } from "../decision-log.js";
 import fs from "fs";
@@ -410,6 +411,19 @@ const PROTECTED_TOOLS = new Set([
   "self_update",
 ]);
 
+function getEffectiveAthFilterPct() {
+  if (config.screening?.source === "gmgn" && config.gmgn?.athFilterPct != null) {
+    return Number(config.gmgn.athFilterPct);
+  }
+  if (config.screening?.athFilterPct != null) {
+    return Number(config.screening.athFilterPct);
+  }
+  if (config.gmgn?.athFilterPct != null) {
+    return Number(config.gmgn.athFilterPct);
+  }
+  return null;
+}
+
 /**
  * Execute a tool call with safety checks and logging.
  */
@@ -584,6 +598,47 @@ async function runSafetyChecks(name, args) {
           pass: false,
           reason: `SOL amount ${amountY} exceeds maximum allowed per position (${config.risk.maxDeployAmount}).`,
         };
+      }
+
+      const athFilterPct = getEffectiveAthFilterPct();
+      if (athFilterPct != null) {
+        let baseMint = args.base_mint || null;
+        if (!baseMint && args.pool_address) {
+          try {
+            const poolDetail = await getPoolDetail({ pool_address: args.pool_address });
+            baseMint = poolDetail?.base_mint || poolDetail?.baseMint || null;
+          } catch (error) {
+            log("executor_warn", `Unable to resolve base mint for ATH guard on ${args.pool_address}: ${error.message}`);
+          }
+        }
+        if (!baseMint) {
+          return {
+            pass: false,
+            reason: `ATH guard is active (${athFilterPct}%). Base mint is missing, so deploy cannot verify distance from ATH.`,
+          };
+        }
+        try {
+          const priceInfo = await getPriceInfo(baseMint);
+          const priceVsAthPct = Number(priceInfo?.price_vs_ath_pct);
+          if (!Number.isFinite(priceVsAthPct)) {
+            return {
+              pass: false,
+              reason: `ATH guard is active (${athFilterPct}%), but price-vs-ATH data is unavailable for ${baseMint}.`,
+            };
+          }
+          const maxAllowedPctOfAth = 100 + athFilterPct;
+          if (priceVsAthPct > maxAllowedPctOfAth) {
+            return {
+              pass: false,
+              reason: `ATH guard blocked deploy: token is still ${priceVsAthPct.toFixed(1)}% of ATH. Need <= ${maxAllowedPctOfAth.toFixed(1)}% (${Math.abs(athFilterPct)}% below ATH) before entry.`,
+            };
+          }
+        } catch (error) {
+          return {
+            pass: false,
+            reason: `ATH guard is active (${athFilterPct}%), but ATH verification failed for ${baseMint}: ${error.message}`,
+          };
+        }
       }
 
       // Check SOL balance
