@@ -586,53 +586,14 @@ STEPS:
 1. Pick the best candidate based on narrative quality, smart wallets, and pool metrics.
 2. Do NOT call deploy_position. Screening is read-only and no on-chain transaction is allowed.
    If the user wants the entry, they must explicitly say deploy/open/add liquidity/LP into a coin, pool, or numbered candidate.
-3. Report in this exact format (no tables, no extra sections):
+3. Report ONLY the selected pool in this exact format (no extra sections or explanations):
    SCREEN REPORT (NO DEPLOY)
-
    <pool name>
    <pool address>
-
-   No deploy executed. Use /deploy <n> or explicitly say "deploy this pool" to enter.
-   Suggested manual deploy size: <deploy amount> SOL | <strategy> | active bin <active_bin>
-
-   MARKET
-   Fee/TVL: <x>%
-   Volume: $<x>
-   TVL: $<x>
-   Volatility: <x>
-   Organic: <x>
-   Mcap: $<x>
-   Age: <x>h
-
-   AUDIT
-   Top10: <x>%
-   Bots: <x>%
-   Fees paid: <x> SOL
-   Smart wallets: <names or none>
-
-   RISK
-   <If OKX advanced/risk data exists, list only the fields that actually exist: Risk level, Bundle, Sniper, Suspicious, ATH distance, Rugpull, Wash.>
-   <If only rugpull/wash exist, list just those.>
-   <If OKX enrichment is missing, write exactly: OKX: unavailable>
-
-   WHY THIS WON
-   <2-4 concise sentences on why this pool won, key risks, and why it still beat the alternatives>
-4. If no pool qualifies, report in this exact format instead:
+4. If no pool qualifies, report exactly:
    SCREEN REPORT (NO DEPLOY)
-
    Cycle finished with no valid entry.
-
-   BEST LOOKING CANDIDATE
-   <name or none>
-
-   WHY SKIPPED
-   <2-4 concise sentences explaining why nothing was good enough>
-
-   REJECTED
-   <short flat list of top candidate names and why they were skipped>
-IMPORTANT:
-- Never write "unknown" for OKX. Use real values, omit missing fields, or write exactly "OKX: unavailable".
-- Keep the whole report compact and highly scannable for Telegram.
+IMPORTANT: Keep the report extremely minimal so it doesn't clutter the UI.
       `, config.llm.maxSteps, [], "SCREENER", config.llm.screeningModel, 2048, {
         onToolStart: async ({ name }) => { await liveMessage?.toolStart(name); },
         onToolFinish: async ({ name, result, success }) => { await liveMessage?.toolFinish(name, result, success); },
