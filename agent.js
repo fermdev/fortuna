@@ -5,8 +5,12 @@ import { executeTool } from "./tools/executor.js";
 import { tools } from "./tools/definitions.js";
 
 const MANAGER_TOOLS  = new Set(["close_position", "claim_fees", "swap_token", "get_position_pnl", "get_my_positions", "get_wallet_balance"]);
-const SCREENER_TOOLS = new Set(["deploy_position", "get_active_bin", "get_top_candidates", "check_smart_wallets_on_pool", "get_token_holders", "get_token_narrative", "get_token_info", "search_pools", "get_pool_memory", "get_wallet_balance", "get_my_positions"]);
+const SCREENER_TOOLS = new Set(["get_active_bin", "get_top_candidates", "check_smart_wallets_on_pool", "get_token_holders", "get_token_narrative", "get_token_info", "search_pools", "get_pool_memory", "get_wallet_balance", "get_my_positions", "get_supertrend_status"]);
 const GENERAL_INTENT_ONLY_TOOLS = new Set([
+  "deploy_position",
+  "close_position",
+  "claim_fees",
+  "swap_token",
   "self_update",
   "update_config",
   "add_to_blacklist",
@@ -45,6 +49,7 @@ const INTENT_TOOLS = {
   study:       new Set(["study_top_lpers", "get_top_lpers", "get_pool_detail", "search_pools", "get_token_info", "discover_pools", "add_smart_wallet", "list_smart_wallets"]),
   performance: new Set(["get_performance_history", "get_my_positions", "get_position_pnl"]),
   lessons:     new Set(["add_lesson", "pin_lesson", "unpin_lesson", "list_lessons", "clear_lessons"]),
+  indicator:   new Set(["get_token_info", "search_pools", "get_supertrend_status"]),
 };
 
 function normalizeGoalForIntent(goal = "") {
@@ -57,10 +62,10 @@ function normalizeGoalForIntent(goal = "") {
 }
 
 const INTENT_PATTERNS = [
-  { intent: "deploy",      re: /\b(deploy|open|add liquidity|lp into|invest in|pasang posisi|buka posisi|masuk pool|entry)\b/i },
+  { intent: "deploy",      re: /\b(deploy|open position|open posisi|add liquidity|lp into|invest in|pasang posisi|buka posisi|masuk pool|entry)\b/i },
   { intent: "policy",      re: /\b(dont|do not|avoid|hindari|skip)\b.{0,40}\b(deploy|open|lp|liquidity|posisi|pool)\b/i },
   { intent: "policy",      re: /\b(same pool|pool yang sama|pool sama|same token|token yang sama)\b/i },
-  { intent: "close",       re: /\b(close|exit|withdraw|remove liquidity|shut down|tutup|keluar posisi|cabut)\b/i },
+  { intent: "close",       re: /\b(close|exit|withdraw|remove liquidity|shut down|zapout|zap out|tutup|keluar posisi|cabut)\b/i },
   { intent: "claim",       re: /\b(claim|harvest|collect|ambil)\b.*\bfee/i },
   { intent: "swap",        re: /\b(swap|convert|sell|exchange|tukar|jual)\b/i },
   { intent: "selfupdate",  re: /\b(self.?update|git pull|pull latest|update (the )?bot|update (the )?agent|update yourself|update bot|pull terbaru)\b/i },
@@ -75,6 +80,7 @@ const INTENT_PATTERNS = [
   { intent: "study",       re: /\b(study top|top lpers?|best lpers?|who.?s lping|lp behavior|lpers?|pelajari lper)\b/i },
   { intent: "performance", re: /\b(performance|history|how.?s the bot|how.?s it doing|stats|report|kinerja|riwayat)\b/i },
   { intent: "lessons",     re: /\b(lesson|learned|teach|pin|unpin|clear lesson|what did you learn|pelajaran|yang dipelajari)\b/i },
+  { intent: "indicator",   re: /\b(supertrend|indicator|chart|above st|below st|di atas supertrend|dibawah supertrend|di bawah supertrend|tf|timeframe)\b/i },
 ];
 
 function getToolsForRole(agentType, goal = "") {
@@ -83,9 +89,11 @@ function getToolsForRole(agentType, goal = "") {
 
   // GENERAL: match intent from goal, combine matched tool sets
   const normalizedGoal = normalizeGoalForIntent(goal);
+  const antiDeployRequest = /\b(dont|do not|avoid|hindari|skip)\b.{0,40}\b(deploy|open|lp|liquidity|posisi|pool)\b/i.test(normalizedGoal);
   const matched = new Set();
   for (const { intent, re } of INTENT_PATTERNS) {
     if (re.test(normalizedGoal)) {
+      if (intent === "deploy" && antiDeployRequest) continue;
       for (const t of INTENT_TOOLS[intent]) matched.add(t);
     }
   }
@@ -112,12 +120,13 @@ const client = new OpenAI({
 
 const DEFAULT_MODEL = process.env.LLM_MODEL || "openrouter/healer-alpha";
 
-const TOOL_REQUIRED_INTENTS = /\b(deploy|open position|open|add liquidity|lp into|invest in|close|exit|withdraw|remove liquidity|claim|harvest|collect|swap|convert|sell|exchange|block|unblock|blacklist|self.?update|pull latest|git pull|update yourself|config|setting|threshold|set |change|update |balance|wallet|position|portfolio|pnl|yield|range|screen|candidate|find pool|search|research|token|smart wallet|whale|watch.?list|tracked wallet|study top|top lpers?|lp behavior|who.?s lping|performance|history|stats|report|lesson|learned|teach|pin|unpin|jangan|jgn|hindari|jangan deploy|buka posisi|tutup posisi|saldo|cari pool)\b/i;
+const TOOL_REQUIRED_INTENTS = /\b(deploy|open position|open|add liquidity|lp into|invest in|close|exit|withdraw|remove liquidity|zapout|zap out|claim|harvest|collect|swap|convert|sell|exchange|block|unblock|blacklist|self.?update|pull latest|git pull|update yourself|config|setting|threshold|set |change|update |balance|wallet|position|portfolio|pnl|yield|range|screen|candidate|find pool|search|research|token|smart wallet|whale|watch.?list|tracked wallet|study top|top lpers?|lp behavior|who.?s lping|performance|history|stats|report|lesson|learned|teach|pin|unpin|jangan|jgn|hindari|jangan deploy|buka posisi|tutup posisi|saldo|cari pool|supertrend|indicator|chart|timeframe)\b/i;
 const CONFIG_READ_ONLY_INTENTS = /\b(check|show|what(?:'s| is)?|review|inspect|see)\b.*\b(config|settings?|thresholds?)\b/i;
 
 function shouldRequireRealToolUse(goal, agentType, interactive = false) {
   if (agentType === "MANAGER") return false;
   if (CONFIG_READ_ONLY_INTENTS.test(goal)) return false;
+  if (/\b(supertrend|indicator|chart|di atas supertrend|di bawah supertrend|dibawah supertrend)\b/i.test(goal)) return interactive;
   // If it's a "why/how/what" question, don't force a tool execution for the result — 
   // the model might be explaining based on already-provided prompt context or history.
   const isQuestion = /^\s*(why|how|what|when|wen|where|explain|tell me about|show me|list|info|ada apa|kenapa|kapan|dimana|siapa|who|is |can |do |does |how's|hows|berapa|apa)\b/i.test(goal);
@@ -233,6 +242,7 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
   const NO_RETRY_TOOLS = new Set(["deploy_position"]);
   const firedOnce = new Set();
   const mustUseRealTool = shouldRequireRealToolUse(goal, agentType, interactive);
+  const allowedToolNames = new Set(getToolsForRole(agentType, goal).map((t) => t.function.name));
   let sawToolCall = false;
   let noToolRetryCount = 0;
 
@@ -249,7 +259,7 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
       let usedModel = activeModel;
       // Force a tool call on step 0 for action intents — prevents the model from inventing deploy/close outcomes
       const ACTION_INTENTS = /\b(deploy|open|add liquidity|close|exit|withdraw|claim|swap|block|unblock|buka posisi|tutup posisi|jangan deploy|hindari)\b/i;
-      let toolChoice = (step === 0 && (ACTION_INTENTS.test(goal) || mustUseRealTool)) ? "required" : "auto";
+      let toolChoice = (step === 0 && agentType !== "SCREENER" && (ACTION_INTENTS.test(goal) || mustUseRealTool)) ? "required" : "auto";
 
       for (let attempt = 0; attempt < 3; attempt++) {
         try {
@@ -374,6 +384,26 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
             log("error", `Failed to parse args for ${functionName}: ${parseError.message}`);
             functionArgs = {};
           }
+        }
+
+        if (!allowedToolNames.has(functionName)) {
+          const result = {
+            blocked: true,
+            reason: `${functionName} is not allowed for this request/role. Screening is report-only; deploy requires an explicit deploy request through an allowed route.`,
+          };
+          log("agent", `Blocked disallowed tool ${functionName} for ${agentType}`);
+          await onToolFinish?.({
+            name: functionName,
+            args: functionArgs,
+            result,
+            success: false,
+            step,
+          });
+          return {
+            role: "tool",
+            tool_call_id: toolCall.id,
+            content: JSON.stringify(result),
+          };
         }
 
         // Block once-per-session tools from firing a second time

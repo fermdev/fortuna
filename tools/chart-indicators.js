@@ -3,6 +3,7 @@ import { log } from "../logger.js";
 
 const DEFAULT_INTERVALS = ["5_MINUTE"];
 const DEFAULT_CANDLES = 298;
+const SUPERTREND_INTERVALS = ["5_MINUTE", "15_MINUTE"];
 
 function getApiBase() {
   return String(config.api.url || "https://api.agentmeridian.xyz/api").replace(/\/+$/, "");
@@ -19,6 +20,25 @@ function normalizeIntervals(intervals) {
   return list
     .map((value) => String(value || "").trim().toUpperCase())
     .filter((value) => value === "5_MINUTE" || value === "15_MINUTE");
+}
+
+function normalizeRequestedIntervals(intervals) {
+  const list = Array.isArray(intervals) && intervals.length ? intervals : SUPERTREND_INTERVALS;
+  const aliases = {
+    "5M": "5_MINUTE",
+    "5MIN": "5_MINUTE",
+    "5_MIN": "5_MINUTE",
+    "5_MINUTE": "5_MINUTE",
+    "15M": "15_MINUTE",
+    "15MIN": "15_MINUTE",
+    "15_MIN": "15_MINUTE",
+    "15_MINUTE": "15_MINUTE",
+  };
+  return [...new Set(
+    list
+      .map((value) => aliases[String(value || "").trim().toUpperCase()])
+      .filter(Boolean),
+  )];
 }
 
 function safeNum(value) {
@@ -315,5 +335,55 @@ export async function confirmIndicatorPreset({
       ? `${preset} confirmed on ${successful.filter((entry) => entry.confirmed).map((entry) => entry.interval).join(", ")}`
       : `${preset} not confirmed on ${successful.map((entry) => entry.interval).join(", ")}`,
     intervals: results,
+  };
+}
+
+export async function getSupertrendStatus({ mint, intervals = SUPERTREND_INTERVALS, refresh = false } = {}) {
+  if (!mint) {
+    return { error: "mint is required" };
+  }
+  mint = String(mint).trim();
+
+  const targets = normalizeRequestedIntervals(intervals);
+  if (!targets.length) {
+    return { error: "No supported intervals. Use 5m or 15m." };
+  }
+
+  const results = [];
+  for (const interval of targets) {
+    try {
+      const payload = await fetchChartIndicatorsForMint(mint, { interval, refresh });
+      const signal = buildSignalSummary(payload);
+      const close = signal.close;
+      const stValue = signal.supertrendValue;
+      const aboveSupertrend = close != null && stValue != null ? close >= stValue : null;
+      results.push({
+        interval,
+        ok: true,
+        close,
+        supertrendValue: stValue,
+        supertrendDirection: signal.supertrendDirection,
+        supertrendBreakUp: signal.supertrendBreakUp,
+        supertrendBreakDown: signal.supertrendBreakDown,
+        aboveSupertrend,
+        rsi: signal.rsi,
+      });
+    } catch (error) {
+      log("indicators_warn", `Supertrend fetch failed for ${mint.slice(0, 8)} ${interval}: ${error.message}`);
+      results.push({
+        interval,
+        ok: false,
+        error: error.message,
+      });
+    }
+  }
+
+  const successful = results.filter((entry) => entry.ok);
+  return {
+    mint,
+    intervals: results,
+    above_intervals: successful.filter((entry) => entry.aboveSupertrend === true).map((entry) => entry.interval),
+    below_intervals: successful.filter((entry) => entry.aboveSupertrend === false).map((entry) => entry.interval),
+    unavailable_intervals: results.filter((entry) => !entry.ok).map((entry) => entry.interval),
   };
 }

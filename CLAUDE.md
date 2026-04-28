@@ -40,7 +40,7 @@ Three agent roles filter which tools the LLM can call:
 
 | Role | Purpose | Key Tools |
 |------|---------|-----------|
-| `SCREENER` | Find and deploy new positions | deploy_position, get_top_candidates, get_token_holders, check_smart_wallets_on_pool |
+| `SCREENER` | Find/report candidate pools only; never deploys without user command | get_top_candidates, get_token_holders, check_smart_wallets_on_pool, get_supertrend_status |
 | `MANAGER` | Manage open positions | close_position, claim_fees, swap_token, get_position_pnl, set_position_note |
 | `GENERAL` | Chat / manual commands | All tools |
 
@@ -98,7 +98,7 @@ Sets defined in `agent.js:6-7`. If you add a tool, also add it to the relevant s
 
 ## Position Lifecycle
 
-1. **Deploy**: `deploy_position` → executor safety checks → `trackPosition()` in state.js → Telegram notify
+1. **Manual Deploy**: explicit user command → `deploy_position` → executor safety checks → `trackPosition()` in state.js → Telegram notify
 2. **Monitor**: management cron → `getMyPositions()` → `getPositionPnl()` → OOR detection → pool-memory snapshots
 3. **Close**: `close_position` → `recordPerformance()` in lessons.js → auto-swap base token to SOL → Telegram notify
 4. **Learn**: `evolveThresholds()` runs on performance data → updates config.screening → persists to user-config.json
@@ -149,7 +149,7 @@ Progress bar format: `[████████░░░░░░░░░░░
 
 ## Race Condition: Double Deploy
 
-`_screeningLastTriggered` in index.js prevents concurrent screener invocations. Management cycle sets this before triggering screener. Also, `deploy_position` safety check uses `force: true` on `getMyPositions()` for a fresh count.
+`_screeningLastTriggered` in index.js prevents concurrent screener invocations. Screening cycles are report-only and cache candidates for `/deploy <n>`. Also, `deploy_position` safety check uses `force: true` on `getMyPositions()` for a fresh count.
 
 ---
 

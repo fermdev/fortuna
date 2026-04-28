@@ -2,7 +2,7 @@
 
 **Autonomous Meteora DLMM liquidity management agent for Solana, powered by LLMs.**
 
-Meridian runs continuous screening and management cycles, deploying capital into high-quality Meteora DLMM pools and closing positions based on live PnL, yield, and range data. It learns from every position it closes.
+Meridian runs continuous screening and management cycles. Screening is report-only by default: it refreshes candidates and waits for an explicit deploy command before opening any new position. Management can still close positions based on live PnL, yield, range data, and your TP/SL rules.
 
 ---
 
@@ -23,7 +23,7 @@ Meridian runs a **ReAct agent loop** — each cycle the LLM reasons over live da
 
 | Agent | Default interval | Role |
 |---|---|---|
-| **Screening Agent** | Every 30 min | Pool screening — finds and deploys into the best candidate |
+| **Screening Agent** | Every 30 min | Pool screening — refreshes candidates and reports the best entries, no auto-deploy |
 | **Management Agent** | Every 10 min | Position management — evaluates each open position and acts |
 
 **Data sources:**
@@ -144,7 +144,7 @@ claude
 
 | Command | What it does |
 |---|---|
-| `/screen` | Full AI screening cycle — checks Discord queue, reads config, fetches candidates, runs deep research, and deploys if a winner is found |
+| `/screen` | Full screening cycle — checks signals/config, fetches candidates, runs research, and reports entries without deploying |
 | `/manage` | Full AI management cycle — checks all positions, evaluates PnL, claims fees, closes OOR/losing positions |
 | `/balance` | Check wallet SOL and token balances |
 | `/positions` | List all open DLMM positions with range status |
@@ -157,13 +157,13 @@ claude
 
 Two specialized sub-agents run inside Claude Code:
 
-**`screener`** — pool screening specialist. Invoke when you want to evaluate candidates, analyse token risk, or deploy a position. Has access to OKX smart money signals, full token audit pipeline, and all strategy logic.
+**`screener`** — pool screening specialist. Invoke when you want to evaluate candidates or analyse token risk. It reports candidates only; deploys require an explicit deploy command.
 
 **`manager`** — position management specialist. Invoke when reviewing open positions, assessing PnL, claiming fees, or closing positions.
 
 To trigger an agent directly, just describe what you want:
 ```
-> screen for new pools and deploy if you find something good
+> screen for new pools and tell me the best candidates
 > review all my positions and close anything out of range
 > what do you think of the SOL/BONK pool?
 ```
@@ -234,7 +234,7 @@ meridian withdraw-liquidity --position <addr> --pool <addr> [--bps 10000]
 **Agent cycles**
 
 ```bash
-meridian screen [--dry-run] [--silent]   # one AI screening cycle
+meridian screen [--dry-run] [--silent]   # one report-only screening cycle
 meridian manage [--dry-run] [--silent]   # one AI management cycle
 meridian start [--dry-run]               # start autonomous agent with cron jobs
 ```
@@ -354,7 +354,7 @@ Add known rug/farm deployer wallet addresses to `deployer-blacklist.json`:
 
 Meridian sends notifications automatically for:
 - Management cycle reports (reasoning + decisions)
-- Screening cycle reports (what it found, whether it deployed)
+- Screening cycle reports with cached candidates (no auto-deploy)
 - OOR alerts when a position leaves range past `outOfRangeWaitMinutes`
 - Deploy: pair, amount, position address, tx hash
 - Close: pair and PnL
@@ -450,7 +450,7 @@ Security notes:
 
 **Notifications sent:**
 - After every management cycle: full agent report (reasoning + decisions)
-- After every screening cycle: full agent report (what it found, whether it deployed)
+- After every screening cycle: full agent report with cached candidates; deploy happens only after an explicit command
 - When a position goes out of range past `outOfRangeWaitMinutes`
 - On deploy: pair, amount, position address, tx hash
 - On close: pair and PnL

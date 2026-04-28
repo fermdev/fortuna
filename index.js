@@ -3,7 +3,7 @@ import cron from "node-cron";
 import readline from "readline";
 import { agentLoop } from "./agent.js";
 import { log } from "./logger.js";
-import { getMyPositions, closePosition, getActiveBin } from "./tools/dlmm.js";
+import { getMyPositions, getActiveBin } from "./tools/dlmm.js";
 import { getWalletBalances } from "./tools/wallet.js";
 import { getTopCandidates } from "./tools/screening.js";
 import { formatGmgnCandidateForPrompt } from "./tools/gmgn.js";
@@ -30,7 +30,6 @@ import { recordPositionSnapshot, recallForPool, addPoolNote } from "./pool-memor
 import { checkSmartWalletsOnPool } from "./smart-wallets.js";
 import { getTokenNarrative, getTokenInfo } from "./tools/token.js";
 import { stageSignals } from "./signal-tracker.js";
-import { getWeightsSummary } from "./signal-weights.js";
 import { bootstrapHiveMind, ensureAgentId, getHiveMindPullMode, isHiveMindEnabled, pullHiveMindLessons, pullHiveMindPresets, registerHiveMindAgent, startHiveMindBackgroundSync } from "./hivemind.js";
 import { appendDecision } from "./decision-log.js";
 
@@ -206,8 +205,8 @@ export async function runManagementCycle({ silent = false } = {}) {
     positions = livePositions?.positions || [];
 
     if (positions.length === 0) {
-      log("cron", "No open positions — triggering screening cycle");
-      mgmtReport = "No open positions. Triggering screening cycle.";
+      log("cron", "No open positions — triggering report-only screening cycle");
+      mgmtReport = "No open positions. Triggering report-only screening cycle.";
       runScreeningCycle().catch((e) => log("cron_error", `Triggered screening failed: ${e.message}`));
       return mgmtReport;
     }
@@ -345,7 +344,7 @@ After executing, write a brief one-line result per position.
     const afterPositions = await getMyPositions({ force: true }).catch(() => null);
     const afterCount = afterPositions?.positions?.length ?? 0;
     if (afterCount < config.risk.maxPositions && Date.now() - _screeningLastTriggered > screeningCooldownMs) {
-      log("cron", `Post-management: ${afterCount}/${config.risk.maxPositions} positions — triggering screening`);
+      log("cron", `Post-management: ${afterCount}/${config.risk.maxPositions} positions — triggering report-only screening`);
       runScreeningCycle().catch((e) => log("cron_error", `Triggered screening failed: ${e.message}`));
     }
   } catch (error) {
@@ -376,38 +375,12 @@ export async function runScreeningCycle({ silent = false } = {}) {
   _screeningBusy = true; // set immediately — prevents TOCTOU race with concurrent callers
   _screeningLastTriggered = Date.now();
 
-  // Hard guards — don't even run the agent if preconditions aren't met
+  // Report-only screening: position/balance data is context, not deploy permission.
   let prePositions, preBalance;
   let liveMessage = null;
   let screenReport = null;
   try {
     [prePositions, preBalance] = await Promise.all([getMyPositions({ force: true }), getWalletBalances()]);
-    if (prePositions.total_positions >= config.risk.maxPositions) {
-      log("cron", `Screening skipped — max positions reached (${prePositions.total_positions}/${config.risk.maxPositions})`);
-      screenReport = `Screening skipped — max positions reached (${prePositions.total_positions}/${config.risk.maxPositions}).`;
-      appendDecision({
-        type: "skip",
-        actor: "SCREENER",
-        summary: "Screening skipped",
-        reason: `Max positions reached (${prePositions.total_positions}/${config.risk.maxPositions})`,
-      });
-      _screeningBusy = false;
-      return screenReport;
-    }
-    const minRequired = config.management.deployAmountSol + config.management.gasReserve;
-    const isDryRun = process.env.DRY_RUN === "true";
-    if (!isDryRun && preBalance.sol < minRequired) {
-      log("cron", `Screening skipped — insufficient SOL (${preBalance.sol.toFixed(3)} < ${minRequired} needed for deploy + gas)`);
-      screenReport = `Screening skipped — insufficient SOL (${preBalance.sol.toFixed(3)} < ${minRequired} needed for deploy + gas).`;
-      appendDecision({
-        type: "skip",
-        actor: "SCREENER",
-        summary: "Screening skipped",
-        reason: `Insufficient SOL (${preBalance.sol.toFixed(3)} < ${minRequired})`,
-      });
-      _screeningBusy = false;
-      return screenReport;
-    }
   } catch (e) {
     log("cron_error", `Screening pre-check failed: ${e.message}`);
     screenReport = `Screening pre-check failed: ${e.message}`;
@@ -415,15 +388,15 @@ export async function runScreeningCycle({ silent = false } = {}) {
     return screenReport;
   }
   if (!silent && telegramEnabled()) {
-    liveMessage = await createLiveMessage("🔍 Screening Cycle", "Scanning candidates...");
+    liveMessage = await createLiveMessage("Screening Cycle", "Scanning candidates (report-only)...");
   }
   timers.screeningLastRun = Date.now();
-  log("cron", `Starting screening cycle [model: ${config.llm.screeningModel}]`);
+  log("cron", "Starting screening report cycle (manual-deploy mode)");
   try {
     // Reuse pre-fetched balance — no extra RPC call needed
     const currentBalance = preBalance;
     const deployAmount = computeDeployAmount(currentBalance.sol);
-    log("cron", `Computed deploy amount: ${deployAmount} SOL (wallet: ${currentBalance.sol} SOL)`);
+    log("cron", `Manual deploy amount if requested: ${deployAmount} SOL (wallet: ${currentBalance.sol} SOL)`);
 
     // Load active strategy
     const activeStrategy = getActiveStrategy();
@@ -487,6 +460,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
     });
 
     if (passing.length === 0) {
+      setLatestCandidates([]);
       const combined = filteredOut.length > 0 ? filteredOut : earlyFilteredExamples;
       const combinedExamples = combined.slice(0, 5)
         .map((entry) => `- ${entry.name}: ${entry.reason}`)
@@ -494,15 +468,15 @@ export async function runScreeningCycle({ silent = false } = {}) {
       const funnelBlock = buildGmgnFunnelReport(gmgnStageCounts, gmgnAllFiltered, { fromStage: 2 });
       const thresholds = `Thresholds: tvl>$${config.screening.minTvl} | vol>$${config.screening.minVolume} | organic>${config.screening.minOrganic}% | holders>${config.screening.minHolders} | fee/tvl>${config.screening.minFeeActiveTvlRatio}%`;
       screenReport = funnelBlock
-        ? `No candidates available.\n\n${funnelBlock}`
+        ? `SCREEN REPORT (NO DEPLOY)\n\nNo candidates available.\n\n${funnelBlock}`
         : combinedExamples
-          ? `No candidates available.\nFiltered examples:\n${combinedExamples}`
-          : `No candidates available (all filtered).\n${thresholds}`;
+          ? `SCREEN REPORT (NO DEPLOY)\n\nNo candidates available.\nFiltered examples:\n${combinedExamples}`
+          : `SCREEN REPORT (NO DEPLOY)\n\nNo candidates available (all filtered).\n${thresholds}`;
       appendDecision({
-        type: "no_deploy",
+        type: "screen_report",
         actor: "SCREENER",
-        summary: "No candidates available",
-        reason: funnelBlock || combinedExamples || "All candidates filtered before deploy",
+        summary: "No candidates available; no deploy executed",
+        reason: funnelBlock || combinedExamples || "All candidates filtered before manual deploy review",
         rejected: combined.slice(0, 5).map((entry) => `${entry.name}: ${entry.reason}`),
       });
       return screenReport;
@@ -517,6 +491,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
     const activeBinResults = await Promise.allSettled(
       passing.map(({ pool }) => getActiveBin({ pool_address: pool.pool }))
     );
+    setLatestCandidates(passing.map(({ pool }) => pool));
 
     // Build compact candidate blocks
     const candidateBlocks = passing.map(({ pool, sw, n, ti, mem }, i) => {
@@ -599,38 +574,26 @@ export async function runScreeningCycle({ silent = false } = {}) {
       return block;
     });
 
-    const weightsSummary = config.darwin?.enabled ? getWeightsSummary() : null;
-
     const { content } = await agentLoop(`
-SCREENING CYCLE
+SCREENING CYCLE - REPORT ONLY
 ${strategyBlock}
-Positions: ${prePositions.total_positions}/${config.risk.maxPositions} | SOL: ${currentBalance.sol.toFixed(3)} | Deploy: ${deployAmount} SOL
+Positions: ${prePositions.total_positions}/${config.risk.maxPositions} | SOL: ${currentBalance.sol.toFixed(3)} | Manual deploy size if requested: ${deployAmount} SOL
 
 PRE-LOADED CANDIDATES (${passing.length} pools):
 ${candidateBlocks.join("\n\n")}
 
 STEPS:
 1. Pick the best candidate based on narrative quality, smart wallets, and pool metrics.
-2. Call deploy_position (active_bin is pre-fetched above — no need to call get_active_bin).
-   strategy = ${config.strategy.strategy} (always use this, never change it).
-   bins_below = round(${config.strategy.minBinsBelow} + (volatility/5)*${config.strategy.maxBinsBelow - config.strategy.minBinsBelow}) clamped to [${config.strategy.minBinsBelow},${config.strategy.maxBinsBelow}].
-   bins_above = 0. Single-side SOL only: set amount_y, keep amount_x = 0.
+2. Do NOT call deploy_position. Screening is read-only and no on-chain transaction is allowed.
+   If the user wants the entry, they must explicitly say deploy/open/add liquidity/LP into a coin, pool, or numbered candidate.
 3. Report in this exact format (no tables, no extra sections):
-   🚀 DEPLOYED
+   SCREEN REPORT (NO DEPLOY)
 
    <pool name>
    <pool address>
 
-   ◎ <deploy amount> SOL | <strategy> | bin <active_bin>
-   Range: <minPrice> → <maxPrice>
-   Range cover: <downside %> downside | <upside %> upside | <total width %> total
-
-   IMPORTANT:
-   - Do NOT calculate the range percentages yourself.
-   - Use the actual deploy_position tool result:
-     range_coverage.downside_pct
-     range_coverage.upside_pct
-     range_coverage.width_pct
+   No deploy executed. Use /deploy <n> or explicitly say "deploy this pool" to enter.
+   Suggested manual deploy size: <deploy amount> SOL | <strategy> | active bin <active_bin>
 
    MARKET
    Fee/TVL: <x>%
@@ -655,7 +618,7 @@ STEPS:
    WHY THIS WON
    <2-4 concise sentences on why this pool won, key risks, and why it still beat the alternatives>
 4. If no pool qualifies, report in this exact format instead:
-   ⛔ NO DEPLOY
+   SCREEN REPORT (NO DEPLOY)
 
    Cycle finished with no valid entry.
 
@@ -676,11 +639,19 @@ IMPORTANT:
       });
     const funnelAppend = buildGmgnFunnelReport(gmgnStageCounts, gmgnAllFiltered, { fromStage: 2 });
     screenReport = funnelAppend ? `${content}\n\n─────────────\n${funnelAppend}` : content;
-    if (/⛔\s*NO DEPLOY/i.test(content)) {
+    appendDecision({
+      type: "screen_report",
+      actor: "SCREENER",
+      pool: passing[0]?.pool?.pool || null,
+      pool_name: passing[0]?.pool?.name || null,
+      summary: "Screening report completed; no deploy executed",
+      reason: stripThink(content).slice(0, 500),
+    });
+    if (/NO VALID ENTRY|NO DEPLOY/i.test(content)) {
       appendDecision({
-        type: "no_deploy",
+        type: "screen_report",
         actor: "SCREENER",
-        summary: "LLM chose no deploy",
+        summary: "Screening report found no valid entry; no deploy executed",
         reason: stripThink(content).slice(0, 500),
       });
     }
@@ -794,7 +765,7 @@ Summarize the current portfolio health, total fees earned, and performance of al
   _cronTasks = [mgmtTask, screenTask, healthTask, briefingTask, briefingWatchdog];
   // Store interval ref so stopCronJobs can clear it
   _cronTasks._pnlPollInterval = pnlPollInterval;
-  log("cron", `Cycles started — management every ${config.schedule.managementIntervalMin}m, screening every ${config.schedule.screeningIntervalMin}m`);
+  log("cron", `Cycles started — management every ${config.schedule.managementIntervalMin}m, report-only screening every ${config.schedule.screeningIntervalMin}m`);
 }
 
 // ═══════════════════════════════════════════
@@ -1367,7 +1338,7 @@ async function runDeterministicScreen(limit = 5) {
       const source = pool.gmgn ? ` | GMGN smart ${pool.gmgn_smart_wallets ?? "?"}, KOL ${pool.gmgn_kol_wallets ?? "?"}, total fee ${pool.gmgn_total_fee_sol ?? "?"} SOL` : ` | organic ${pool.organic_score ?? "?"}`;
       return `${i + 1}. ${pool.name} | ${pool.pool}\n   fee/aTVL ${feeTvl}% | vol $${vol}${source}`;
     });
-    return `Top candidates (${candidates.length})\n\n${lines.join("\n")}`;
+    return `Top candidates (${candidates.length}) - no deploy executed\n\n${lines.join("\n")}\n\nUse /deploy <n> or explicitly tell me which coin/pool to deploy.`;
   }
   const examples = (top?.filtered_examples || []).slice(0, 3)
     .map((entry) => `- ${entry.name}: ${entry.reason}`)
@@ -1399,8 +1370,8 @@ async function deployLatestCandidate(index) {
     organic_score: candidate.organic_score,
     initial_value_usd: candidate.active_tvl ?? candidate.tvl ?? null,
   });
-  if (result?.success === false || result?.error) {
-    throw new Error(result.error || "Deploy failed");
+  if (result?.success === false || result?.error || result?.blocked) {
+    throw new Error(result.error || result.reason || "Deploy failed");
   }
   return { result, candidate, deployAmount, binsBelow };
 }
@@ -1554,11 +1525,15 @@ async function telegramHandler(msg) {
       if (idx < 0 || idx >= positions.length) { await sendMessage("Invalid number. Use /positions first."); return; }
       const pos = positions[idx];
       await sendMessage(`Closing ${pos.pair}...`);
-      const result = await closePosition({ position_address: pos.position });
+      const result = await executeTool("close_position", {
+        position_address: pos.position,
+        reason: "user command /close",
+      });
       if (result.success) {
         const closeTxs = result.close_txs?.length ? result.close_txs : result.txs;
         const claimNote = result.claim_txs?.length ? `\nClaim txs: ${result.claim_txs.join(", ")}` : "";
-        await sendMessage(`✅ Closed ${pos.pair}\nPnL: ${config.management.solMode ? "◎" : "$"}${result.pnl_usd ?? "?"} | close txs: ${closeTxs?.join(", ") || "n/a"}${claimNote}`);
+        const zapNote = result.auto_swapped ? `\nZapout: swapped back to SOL${result.sol_received ? ` (${result.sol_received} SOL)` : ""}` : "";
+        await sendMessage(`✅ Closed ${pos.pair}\nPnL: ${config.management.solMode ? "◎" : "$"}${result.pnl_usd ?? "?"} | close txs: ${closeTxs?.join(", ") || "n/a"}${claimNote}${zapNote}`);
       } else {
         await sendMessage(`❌ Close failed: ${JSON.stringify(result)}`);
       }
@@ -1574,8 +1549,12 @@ async function telegramHandler(msg) {
       const results = [];
       for (const pos of positions) {
         try {
-          const result = await closePosition({ position_address: pos.position });
-          results.push(`${pos.pair}: ${result.success ? "closed" : `failed (${result.error || "unknown"})`}`);
+          const result = await executeTool("close_position", {
+            position_address: pos.position,
+            reason: "user command /closeall",
+          });
+          const zap = result.auto_swapped ? " + zapout SOL" : "";
+          results.push(`${pos.pair}: ${result.success ? `closed${zap}` : `failed (${result.error || "unknown"})`}`);
         } catch (error) {
           results.push(`${pos.pair}: failed (${error.message})`);
         }
@@ -1712,10 +1691,8 @@ async function telegramHandler(msg) {
   let liveMessage = null;
   try {
     log("telegram", `Incoming: ${text}`);
-    const hasCloseIntent = /\bclose\b|\bsell\b|\bexit\b|\bwithdraw\b/i.test(text);
-    const isDeployRequest = !hasCloseIntent && /\bdeploy\b|\bopen position\b|\blp into\b|\badd liquidity\b/i.test(text);
-    const agentRole = isDeployRequest ? "SCREENER" : "GENERAL";
-    const agentModel = agentRole === "SCREENER" ? config.llm.screeningModel : config.llm.generalModel;
+    const agentRole = "GENERAL";
+    const agentModel = config.llm.generalModel;
     liveMessage = await createLiveMessage("🤖 Live Update", `Request: ${text.slice(0, 240)}`);
     const { content } = await agentLoop(text, config.llm.maxSteps, sessionHistory, agentRole, agentModel, null, {
       interactive: true,
@@ -1829,7 +1806,7 @@ if (isTTY) {
   console.log(`
 Commands:
   1 / 2 / 3 ...  Deploy ${DEPLOY} SOL into that pool
-  auto           Let the agent pick and deploy automatically
+  auto           Explicitly deploy cached #1 candidate
   /status        Refresh wallet + positions
   /candidates    Refresh top pool list
   /briefing      Show morning briefing (last 24h)
@@ -1852,14 +1829,20 @@ Commands:
     if (!isNaN(pick) && pick >= 1 && pick <= latest.length) {
       await runBusy(async () => {
         const pool = latest[pick - 1];
-        console.log(`\nDeploying ${DEPLOY} SOL into ${pool.name}...\n`);
-        const { content: reply } = await agentLoop(
-          `Deploy ${DEPLOY} SOL into pool ${pool.pool} (${pool.name}). Call get_active_bin first then deploy_position. Report result.`,
-          config.llm.maxSteps,
-          [],
-          "SCREENER"
-        );
-        console.log(`\n${reply}\n`);
+        console.log(`\nDeploying cached candidate #${pick}: ${pool.name}...\n`);
+        const { result, deployAmount, binsBelow } = await deployLatestCandidate(pick - 1);
+        const coverage = result.range_coverage
+          ? `Range: ${fmtPct(result.range_coverage.downside_pct)} downside | ${fmtPct(result.range_coverage.upside_pct)} upside`
+          : `Strategy: ${config.strategy.strategy} | binsBelow: ${binsBelow}`;
+        console.log([
+          `Deployed ${pool.name}`,
+          `Pool: ${pool.pool}`,
+          `Amount: ${deployAmount} SOL`,
+          coverage,
+          `Position: ${result.position || "n/a"}`,
+          result.txs?.length ? `Tx: ${result.txs[0]}` : null,
+        ].filter(Boolean).join("\n"));
+        console.log();
         launchCron();
       });
       return;
@@ -1868,14 +1851,24 @@ Commands:
     // ── auto: agent picks and deploys ───────
     if (input.toLowerCase() === "auto") {
       await runBusy(async () => {
-        console.log("\nAgent is picking and deploying...\n");
-        const { content: reply } = await agentLoop(
-          `get_top_candidates, pick the best one, get_active_bin, deploy_position with ${DEPLOY} SOL. Execute now, don't ask.`,
-          config.llm.maxSteps,
-          [],
-          "SCREENER"
-        );
-        console.log(`\n${reply}\n`);
+        console.log("\nDeploying cached #1 candidate by explicit auto command...\n");
+        if (!getLatestCandidatesMeta().candidates.length) {
+          const { candidates } = await getTopCandidates({ limit: 5 });
+          setLatestCandidates(candidates);
+        }
+        const { candidate, result, deployAmount, binsBelow } = await deployLatestCandidate(0);
+        const coverage = result.range_coverage
+          ? `Range: ${fmtPct(result.range_coverage.downside_pct)} downside | ${fmtPct(result.range_coverage.upside_pct)} upside`
+          : `Strategy: ${config.strategy.strategy} | binsBelow: ${binsBelow}`;
+        console.log([
+          `Deployed ${candidate.name}`,
+          `Pool: ${candidate.pool}`,
+          `Amount: ${deployAmount} SOL`,
+          coverage,
+          `Position: ${result.position || "n/a"}`,
+          result.txs?.length ? `Tx: ${result.txs[0]}` : null,
+        ].filter(Boolean).join("\n"));
+        console.log();
         launchCron();
       });
       return;
@@ -2041,17 +2034,7 @@ Focus on: hold duration, entry/exit timing, what win rates look like, whether sc
   startCronJobs();
   maybeRunMissedBriefing().catch(() => { });
   startPolling(telegramHandler);
-  (async () => {
-    try {
-      const startupStep3 = process.env.DRY_RUN === "true"
-        ? `3. Ignore wallet SOL threshold in dry run: get_top_candidates then simulate deploy ${DEPLOY} SOL.`
-        : `3. If SOL >= ${config.management.minSolToOpen}: get_top_candidates then deploy ${DEPLOY} SOL.`;
-      await agentLoop(`
-STARTUP CHECK
-1. get_wallet_balance. 2. get_my_positions. ${startupStep3} 4. Report.
-      `, config.llm.maxSteps, [], "SCREENER");
-    } catch (e) {
-      log("startup_error", e.message);
-    }
-  })();
+  runScreeningCycle({ silent: true }).catch((e) => {
+    log("startup_error", `Startup screening report failed: ${e.message}`);
+  });
 }

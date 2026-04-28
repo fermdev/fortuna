@@ -261,7 +261,7 @@ WARNING: This executes a real on-chain transaction.`,
     function: {
       name: "close_position",
       description: `Remove all liquidity and close a position.
-This withdraws all tokens back to the wallet and closes the position account.
+This withdraws all tokens back to the wallet and, through the executor, zaps out base tokens back to SOL by default unless skip_swap=true.
 Use when:
 - Position has been out of range for > 30 minutes
 - IL exceeds accumulated fees
@@ -545,6 +545,40 @@ BAD narrative signals (caution or skip):
         type: "object",
         properties: {
           mint: { type: "string", description: "Token mint address (base58)" }
+        },
+        required: ["mint"]
+      }
+    }
+  },
+
+  {
+    type: "function",
+    function: {
+      name: "get_supertrend_status",
+      description: `Report whether a token is above or below Supertrend on supported chart timeframes.
+Use when the user asks if a coin/token is above Supertrend, below Supertrend, or asks for chart indicator status by timeframe.
+If the user gives only a symbol/name, call get_token_info first to resolve the mint address.
+
+Supported intervals: 5m and 15m. Returns close price, Supertrend value, direction, break up/down flags, RSI, and which intervals are above/below Supertrend.`,
+      parameters: {
+        type: "object",
+        properties: {
+          mint: {
+            type: "string",
+            description: "Token mint address (base58). Use get_token_info first if you only have a symbol/name."
+          },
+          intervals: {
+            type: "array",
+            items: {
+              type: "string",
+              enum: ["5m", "15m", "5_MINUTE", "15_MINUTE"]
+            },
+            description: "Intervals to check. Default checks both 5m and 15m."
+          },
+          refresh: {
+            type: "boolean",
+            description: "Set true to force fresh indicator data."
+          }
         },
         required: ["mint"]
       }

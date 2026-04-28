@@ -57,7 +57,7 @@ Output: { pnl_pct, pnl_usd, unclaimed_fee_usd, all_time_fees_usd, current_value_
 \`\`\`
 
 ### meridian screen [--dry-run] [--silent]
-Runs one AI screening cycle to find and deploy new positions.
+Runs one screening cycle to refresh/report candidates only. It never deploys.
 \`\`\`
 Output: { done: true, report: "..." }
 \`\`\`
